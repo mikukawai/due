@@ -10,6 +10,33 @@ import (
 
 type RouteHandler func(ctx Context)
 
+// RouteOptions 路由选项
+type RouteOptions struct {
+	// 是否内部的路由，默认非内部
+	// 外部路由可在客户端、网关、节点间进行消息流转
+	// 内部路由仅限于在节点间进行消息流转
+	Internal bool
+
+	// 是否有状态路由，默认无状态
+	// 无状态路由消息会根据负载均衡策略分配到不同的节点服务器进行处理
+	// 有状态路由消息会在绑定节点服务器后，固定路由到绑定的节点服务器进行处理
+	Stateful bool
+
+	// 是否授权路由，默认非授权
+	// 授权路由在集群间流转时必需附带UID信息，否则无法进行路由投递
+	// 该参数可在网关层对未授权连接进行提前拦截，降低节点服对于攻击处理的压力
+	Authorized bool
+
+	// 路由中间件
+	Middlewares []MiddlewareHandler
+}
+
+var (
+	InternalRoute   = RouteOptions{Internal: true}
+	StatefulRoute   = RouteOptions{Stateful: true}
+	AuthorizedRoute = RouteOptions{Authorized: true}
+)
+
 type Router struct {
 	node                *Node
 	routes              map[int32]*routeEntity
@@ -20,32 +47,9 @@ type Router struct {
 }
 
 type routeEntity struct {
-	route       int32               // 路由
-	stateful    bool                // 是否有状态
-	internal    bool                // 是否内部路由
-	handler     RouteHandler        // 路由处理器
-	middlewares []MiddlewareHandler // 路由中间件
-}
-
-type RouteOptions struct {
-	// 是否有状态路由，默认无状态
-	// 无状态路由消息会根据负载均衡策略分配到不同的节点服务器进行处理
-	// 有状态路由消息会在绑定节点服务器后，固定路由到绑定的节点服务器进行处理
-	Stateful bool
-
-	// 是否内部的路由，默认非内部
-	// 外部路由可在客户端、网关、节点间进行消息流转
-	// 内部路由仅限于在节点间进行消息流转
-	Internal bool
-
-	// 是否受限的路由，默认不受限
-	// 仅对无状态路由生效
-	// 受限的路由在节点状态变更为cluster.Hang或cluster.Shut时，不会路由到该节点；网关层会优先选取其他处于cluster.Work状态的节点；若无cluster.Work状态的节点则选取cluster.Busy节点
-	// 非受限路由不受节点状态影响
-	Restricted bool
-
-	// 路由中间件
-	Middlewares []MiddlewareHandler
+	route   int32        // 路由
+	handler RouteHandler // 路由处理器
+	options RouteOptions // 路由选项
 }
 
 func newRouter(node *Node) *Router {
@@ -57,33 +61,23 @@ func newRouter(node *Node) *Router {
 }
 
 // AddRouteHandler 添加路由处理器
-func (r *Router) AddRouteHandler(route int32, stateful bool, handler RouteHandler, middlewares ...MiddlewareHandler) {
+func (r *Router) AddRouteHandler(route int32, handler RouteHandler, opts ...RouteOptions) {
 	if r.node.getState() != cluster.Shut {
 		log.Warnf("the node server is working, can't add route handler")
 		return
 	}
 
-	r.routes[route] = &routeEntity{
-		route:       route,
-		stateful:    stateful,
-		handler:     handler,
-		middlewares: middlewares[:],
-	}
-}
-
-// AddInternalRouteHandler 添加内部路由处理器（node节点间路由消息处理）
-func (r *Router) AddInternalRouteHandler(route int32, stateful bool, handler RouteHandler, middlewares ...MiddlewareHandler) {
-	if r.node.getState() != cluster.Shut {
-		log.Warnf("the node server is working, can't add route handler")
-		return
-	}
-
-	r.routes[route] = &routeEntity{
-		route:       route,
-		stateful:    stateful,
-		internal:    true,
-		handler:     handler,
-		middlewares: middlewares[:],
+	if len(opts) > 0 {
+		r.routes[route] = &routeEntity{
+			route:   route,
+			handler: handler,
+			options: opts[0],
+		}
+	} else {
+		r.routes[route] = &routeEntity{
+			route:   route,
+			handler: handler,
+		}
 	}
 }
 
@@ -125,7 +119,7 @@ func (r *Router) SetPostRouteHandler(handler RouteHandler) {
 // CheckRouteStateful 是否为有状态路由
 func (r *Router) CheckRouteStateful(route int32) (stateful bool, exist bool) {
 	if entity, ok := r.routes[route]; ok {
-		exist, stateful = ok, entity.stateful
+		exist, stateful = ok, entity.options.Stateful
 	}
 	return
 }
@@ -181,8 +175,8 @@ func (r *Router) handle(req *request) {
 	}
 
 	if ok {
-		if len(route.middlewares) > 0 {
-			middleware := &Middleware{index: -1, middlewares: route.middlewares, routeHandler: route.handler}
+		if len(route.options.Middlewares) > 0 {
+			middleware := &Middleware{index: -1, middlewares: route.options.Middlewares, routeHandler: route.handler}
 			middleware.Next(req)
 			return
 		} else {
@@ -210,21 +204,21 @@ func (g *RouterGroup) Middleware(middlewares ...MiddlewareHandler) *RouterGroup 
 }
 
 // AddRouteHandler 添加路由处理器
-func (g *RouterGroup) AddRouteHandler(route int32, stateful bool, handler RouteHandler, middlewares ...MiddlewareHandler) *RouterGroup {
-	dst := make([]MiddlewareHandler, len(g.middlewares)+len(middlewares))
-	copy(dst, g.middlewares)
-	copy(dst[len(g.middlewares):], middlewares)
-	g.router.AddRouteHandler(route, stateful, handler, dst...)
+func (g *RouterGroup) AddRouteHandler(route int32, handler RouteHandler, opts ...RouteOptions) *RouterGroup {
+	var options RouteOptions
 
-	return g
-}
+	if len(opts) > 0 {
+		options = opts[0]
+		options.Middlewares = make([]MiddlewareHandler, len(g.middlewares)+len(opts[0].Middlewares))
+		copy(options.Middlewares, g.middlewares)
+		copy(options.Middlewares[len(g.middlewares):], opts[0].Middlewares)
+	} else {
+		options = RouteOptions{}
+		options.Middlewares = make([]MiddlewareHandler, len(g.middlewares))
+		copy(options.Middlewares, g.middlewares)
+	}
 
-// AddInternalRouteHandler 添加内部路由处理器（node节点间路由消息处理）
-func (g *RouterGroup) AddInternalRouteHandler(route int32, stateful bool, handler RouteHandler, middlewares ...MiddlewareHandler) *RouterGroup {
-	dst := make([]MiddlewareHandler, len(g.middlewares)+len(middlewares))
-	copy(dst, g.middlewares)
-	copy(dst[len(g.middlewares):], middlewares)
-	g.router.AddInternalRouteHandler(route, stateful, handler, dst...)
+	g.router.AddRouteHandler(route, handler, options)
 
 	return g
 }

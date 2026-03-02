@@ -2,10 +2,11 @@ package protocol
 
 import (
 	"encoding/binary"
+	"io"
+
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
-	"io"
 )
 
 const (
@@ -15,17 +16,15 @@ const (
 
 // EncodeDeliverReq 编码投递消息请求
 // 协议：size + header + route + seq + cid + uid + <message packet>
-func EncodeDeliverReq(seq uint64, cid int64, uid int64, message []byte) buffer.Buffer {
-	buf := buffer.NewNocopyBuffer()
-	writer := buf.Malloc(deliverReqBytes)
-	writer.WriteUint32s(binary.BigEndian, uint32(deliverReqBytes-defaultSizeBytes+len(message)))
+func EncodeDeliverReq(seq uint64, cid int64, uid int64, buf buffer.Buffer) *buffer.NocopyBuffer {
+	writer := buffer.MallocWriter(deliverReqBytes)
+	writer.WriteUint32s(binary.BigEndian, uint32(deliverReqBytes-defaultSizeBytes+buf.Len()))
 	writer.WriteUint8s(dataBit)
 	writer.WriteUint8s(route.Deliver)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteInt64s(binary.BigEndian, cid, uid)
-	buf.Mount(message)
 
-	return buf
+	return buffer.NewNocopyBuffer(writer, buf)
 }
 
 // DecodeDeliverReq 解码投递消息请求
@@ -55,16 +54,15 @@ func DecodeDeliverReq(data []byte) (seq uint64, cid int64, uid int64, message []
 
 // EncodeDeliverRes 编码投递消息响应
 // 协议：size + header + route + seq + code
-func EncodeDeliverRes(seq uint64, code uint16) buffer.Buffer {
-	buf := buffer.NewNocopyBuffer()
-	writer := buf.Malloc(deliverResBytes)
+func EncodeDeliverRes(seq uint64, code uint16) *buffer.NocopyBuffer {
+	writer := buffer.MallocWriter(deliverResBytes)
 	writer.WriteUint32s(binary.BigEndian, uint32(deliverResBytes-defaultSizeBytes))
 	writer.WriteUint8s(dataBit)
 	writer.WriteUint8s(route.Deliver)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint16s(binary.BigEndian, code)
 
-	return buf
+	return buffer.NewNocopyBuffer(writer)
 }
 
 // DecodeDeliverRes 解码投递消息响应

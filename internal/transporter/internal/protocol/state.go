@@ -2,11 +2,12 @@ package protocol
 
 import (
 	"encoding/binary"
+	"io"
+
 	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
-	"io"
 )
 
 const (
@@ -18,15 +19,14 @@ const (
 
 // EncodeGetStateReq 编码获取状态请求
 // 协议：size + header + route + seq
-func EncodeGetStateReq(seq uint64) buffer.Buffer {
-	buf := buffer.NewNocopyBuffer()
-	writer := buf.Malloc(getStateReqBytes)
+func EncodeGetStateReq(seq uint64) *buffer.NocopyBuffer {
+	writer := buffer.MallocWriter(getStateReqBytes)
 	writer.WriteUint32s(binary.BigEndian, uint32(getStateReqBytes-defaultSizeBytes))
 	writer.WriteUint8s(dataBit)
 	writer.WriteUint8s(route.GetState)
 	writer.WriteUint64s(binary.BigEndian, seq)
 
-	return buf
+	return buffer.NewNocopyBuffer(writer)
 }
 
 // DecodeGetStateReq 解码获取状态请求
@@ -52,9 +52,8 @@ func DecodeGetStateReq(data []byte) (seq uint64, err error) {
 
 // EncodeGetStateRes 编码获取状态响应
 // 协议：size + header + route + seq + code + cluster state
-func EncodeGetStateRes(seq uint64, code uint16, state cluster.State) buffer.Buffer {
-	buf := buffer.NewNocopyBuffer()
-	writer := buf.Malloc(getStateResBytes)
+func EncodeGetStateRes(seq uint64, code uint16, state cluster.State) *buffer.NocopyBuffer {
+	writer := buffer.MallocWriter(getStateResBytes)
 	writer.WriteUint32s(binary.BigEndian, uint32(getStateResBytes-defaultSizeBytes))
 	writer.WriteUint8s(dataBit)
 	writer.WriteUint8s(route.GetState)
@@ -62,7 +61,7 @@ func EncodeGetStateRes(seq uint64, code uint16, state cluster.State) buffer.Buff
 	writer.WriteUint16s(binary.BigEndian, code)
 	writer.WriteUint8s(uint8(state))
 
-	return buf
+	return buffer.NewNocopyBuffer(writer)
 }
 
 // DecodeGetStateRes 解码获取状态响应
@@ -94,16 +93,15 @@ func DecodeGetStateRes(data []byte) (code uint16, state cluster.State, err error
 
 // EncodeSetStateReq 编码设置状态请求
 // 协议：size + header + route + seq + cluster state
-func EncodeSetStateReq(seq uint64, state cluster.State) buffer.Buffer {
-	buf := buffer.NewNocopyBuffer()
-	writer := buf.Malloc(setStateReqBytes)
+func EncodeSetStateReq(seq uint64, state cluster.State) *buffer.NocopyBuffer {
+	writer := buffer.MallocWriter(setStateReqBytes)
 	writer.WriteUint32s(binary.BigEndian, uint32(setStateReqBytes-defaultSizeBytes))
 	writer.WriteUint8s(dataBit)
 	writer.WriteUint8s(route.SetState)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint8s(uint8(state))
 
-	return buf
+	return buffer.NewNocopyBuffer(writer)
 }
 
 // DecodeSetStateReq 解码设置状态请求
@@ -135,16 +133,15 @@ func DecodeSetStateReq(data []byte) (seq uint64, state cluster.State, err error)
 
 // EncodeSetStateRes 编码设置状态响应
 // 协议：size + header + route + seq + code
-func EncodeSetStateRes(seq uint64, code uint16) buffer.Buffer {
-	buf := buffer.NewNocopyBuffer()
-	writer := buf.Malloc(setStateReqBytes)
-	writer.WriteUint32s(binary.BigEndian, uint32(setStateReqBytes-defaultSizeBytes))
+func EncodeSetStateRes(seq uint64, code uint16) *buffer.NocopyBuffer {
+	writer := buffer.MallocWriter(setStateResBytes)
+	writer.WriteUint32s(binary.BigEndian, uint32(setStateResBytes-defaultSizeBytes))
 	writer.WriteUint8s(dataBit)
 	writer.WriteUint8s(route.SetState)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint16s(binary.BigEndian, code)
 
-	return buf
+	return buffer.NewNocopyBuffer(writer)
 }
 
 // DecodeSetStateRes 解码绑定响应

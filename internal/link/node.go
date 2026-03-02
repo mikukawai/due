@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dobyte/due/v2/cluster"
+	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/core/endpoint"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/internal/dispatcher"
@@ -27,24 +28,28 @@ type NodeLinker struct {
 }
 
 func NewNodeLinker(ctx context.Context, opts *Options) *NodeLinker {
-	l := &NodeLinker{
+	return &NodeLinker{
 		ctx:        ctx,
 		opts:       opts,
 		builder:    node.NewBuilder(&node.Options{InsID: opts.InsID, InsKind: opts.InsKind}),
 		dispatcher: dispatcher.NewDispatcher(opts.Dispatch),
 		sources:    make(map[int64]map[string]string),
 	}
-
-	return l
 }
 
-// Ask 检测用户是否在给定的节点上
-func (l *NodeLinker) Ask(ctx context.Context, uid int64, name, nid string) (string, bool, error) {
+// HasNode 检测是否存在某个节点
+func (l *NodeLinker) HasNode(nid string) bool {
+	_, err := l.dispatcher.FindEndpoint(nid)
+	return err == nil
+}
+
+// AskNode 检测用户是否在给定的节点上
+func (l *NodeLinker) AskNode(ctx context.Context, uid int64, name, nid string) (string, bool, error) {
 	if l.opts.Locator == nil {
 		return "", false, errors.ErrNotFoundLocator
 	}
 
-	if insID, ok := l.doGetSource(uid, name); ok {
+	if insID, ok := l.doLoadSource(uid, name); ok {
 		return insID, insID == nid, nil
 	}
 
@@ -57,24 +62,18 @@ func (l *NodeLinker) Ask(ctx context.Context, uid int64, name, nid string) (stri
 		return "", false, errors.ErrNotFoundUserLocation
 	}
 
-	l.doSaveSource(uid, name, insID)
+	l.doStoreSource(uid, name, insID)
 
 	return insID, insID == nid, nil
 }
 
-// Has 检测是否存在某个节点
-func (l *NodeLinker) Has(nid string) bool {
-	_, err := l.dispatcher.FindEndpoint(nid)
-	return err == nil
-}
-
-// Locate 定位用户所在节点
-func (l *NodeLinker) Locate(ctx context.Context, uid int64, name string) (string, error) {
+// LocateNode 定位用户所在节点
+func (l *NodeLinker) LocateNode(ctx context.Context, uid int64, name string) (string, error) {
 	if l.opts.Locator == nil {
 		return "", errors.ErrNotFoundLocator
 	}
 
-	nid, ok := l.doGetSource(uid, name)
+	nid, ok := l.doLoadSource(uid, name)
 	if ok {
 		return nid, nil
 	}
@@ -88,39 +87,46 @@ func (l *NodeLinker) Locate(ctx context.Context, uid int64, name string) (string
 		return "", errors.ErrNotFoundUserLocation
 	}
 
-	l.doSaveSource(uid, name, nid)
+	l.doStoreSource(uid, name, nid)
 
 	return nid, nil
 }
 
-// Bind 绑定节点
+// LocateNodes 定位用户所在节点列表
+func (l *NodeLinker) LocateNodes(ctx context.Context, uid int64) (map[string]string, error) {
+	if l.opts.Locator == nil {
+		return nil, errors.ErrNotFoundLocator
+	}
+
+	return l.opts.Locator.LocateNodes(ctx, uid)
+}
+
+// BindNode 绑定节点
 // 单个用户可以绑定到多个节点服务器上，相同名称的节点服务器只能绑定一个，多次绑定会到相同名称的节点服务器会覆盖之前的绑定。
 // 绑定操作会通过发布订阅方式同步到网关服务器和其他相关节点服务器上。
-func (l *NodeLinker) Bind(ctx context.Context, uid int64, name, nid string) error {
+func (l *NodeLinker) BindNode(ctx context.Context, uid int64, name, nid string) error {
 	if l.opts.Locator == nil {
 		return errors.ErrNotFoundLocator
 	}
 
-	err := l.opts.Locator.BindNode(ctx, uid, name, nid)
-	if err != nil {
+	if err := l.opts.Locator.BindNode(ctx, uid, name, nid); err != nil {
 		return err
 	}
 
-	l.doSaveSource(uid, name, nid)
+	l.doStoreSource(uid, name, nid)
 
 	return nil
 }
 
-// Unbind 解绑节点
+// UnbindNode 解绑节点
 // 解绑时会对对应名称的节点服务器进行解绑，解绑时会对解绑节点ID进行校验，不匹配则解绑失败。
 // 解绑操作会通过发布订阅方式同步到网关服务器和其他相关节点服务器上。
-func (l *NodeLinker) Unbind(ctx context.Context, uid int64, name, nid string) error {
+func (l *NodeLinker) UnbindNode(ctx context.Context, uid int64, name, nid string) error {
 	if l.opts.Locator == nil {
 		return errors.ErrNotFoundLocator
 	}
 
-	err := l.opts.Locator.UnbindNode(ctx, uid, name, nid)
-	if err != nil {
+	if err := l.opts.Locator.UnbindNode(ctx, uid, name, nid); err != nil {
 		return err
 	}
 
@@ -129,18 +135,49 @@ func (l *NodeLinker) Unbind(ctx context.Context, uid int64, name, nid string) er
 	return nil
 }
 
+// FetchNodeList 拉取节点列表
+func (l *NodeLinker) FetchNodeList(ctx context.Context, states ...cluster.State) ([]*registry.ServiceInstance, error) {
+	services, err := l.opts.Registry.Services(ctx, cluster.Node.String())
+	if err != nil {
+		return nil, err
+	}
+
+	if len(states) == 0 {
+		return services, nil
+	}
+
+	mp := make(map[string]struct{}, len(states))
+	for _, state := range states {
+		mp[state.String()] = struct{}{}
+	}
+
+	list := make([]*registry.ServiceInstance, 0, len(services))
+	for i := range services {
+		if _, ok := mp[services[i].State]; ok {
+			list = append(list, services[i])
+		}
+	}
+
+	return list, nil
+}
+
 // Deliver 投递消息给节点处理
 func (l *NodeLinker) Deliver(ctx context.Context, args *DeliverArgs) error {
-	var message []byte
+	var (
+		err       error
+		buf       buffer.Buffer
+		isDeliver bool
+	)
 
-	switch msg := args.Message.(type) {
+	switch b := args.Buffer.(type) {
 	case []byte:
-		message = msg
+		buf = buffer.NewNocopyBuffer(b)
+	case buffer.Buffer:
+		buf = b
 	case *Message:
-		if m, err := l.doPackMessage(msg, false); err != nil {
+		if buf, err = l.PackMessage(b, false); err != nil {
+			buf.Release()
 			return err
-		} else {
-			message = m
 		}
 	default:
 		return errors.ErrInvalidMessage
@@ -149,16 +186,24 @@ func (l *NodeLinker) Deliver(ctx context.Context, args *DeliverArgs) error {
 	if args.NID != "" {
 		client, err := l.doBuildClient(args.NID)
 		if err != nil {
+			buf.Release()
 			return err
+		} else {
+			return client.Deliver(ctx, args.CID, args.UID, buf)
 		}
-
-		return client.Deliver(ctx, args.CID, args.UID, message)
 	} else {
-		_, err := l.doRPC(ctx, args.Route, args.UID, func(ctx context.Context, client *node.Client) (bool, any, error) {
-			return false, nil, client.Deliver(ctx, args.CID, args.UID, message)
-		})
-		if err != nil && !errors.Is(err, errors.ErrNotFoundUserLocation) {
-			return err
+		if _, err = l.doRPC(ctx, args.Route, args.UID, func(ctx context.Context, client *node.Client) (bool, any, error) {
+			isDeliver = true
+
+			return false, nil, client.Deliver(ctx, args.CID, args.UID, buf)
+		}); err != nil {
+			if !isDeliver {
+				buf.Release()
+			}
+
+			if !errors.Is(err, errors.ErrNotFoundUserLocation) {
+				return err
+			}
 		}
 
 		return nil
@@ -188,32 +233,6 @@ func (l *NodeLinker) Trigger(ctx context.Context, args *TriggerArgs) error {
 	})
 
 	return eg.Wait()
-}
-
-// FetchNodeList 拉取节点列表
-func (l *NodeLinker) FetchNodeList(ctx context.Context, states ...cluster.State) ([]*registry.ServiceInstance, error) {
-	services, err := l.opts.Registry.Services(ctx, cluster.Node.String())
-	if err != nil {
-		return nil, err
-	}
-
-	if len(states) == 0 {
-		return services, nil
-	}
-
-	mp := make(map[string]struct{}, len(states))
-	for _, state := range states {
-		mp[state.String()] = struct{}{}
-	}
-
-	list := make([]*registry.ServiceInstance, 0, len(services))
-	for i := range services {
-		if _, ok := mp[services[i].State]; ok {
-			list = append(list, services[i])
-		}
-	}
-
-	return list, nil
 }
 
 // GetState 获取节点状态
@@ -253,33 +272,36 @@ func (l *NodeLinker) doRPC(ctx context.Context, routeID int32, uid int64, fn fun
 		return nil, err
 	}
 
+	if uid == 0 && (route.Stateful() || route.Authorized()) {
+		return nil, errors.ErrIllegalRequest
+	}
+
 	if l.opts.InsKind == cluster.Gate && route.Internal() {
 		return nil, errors.ErrIllegalRequest
 	}
 
 	for range 2 {
 		if route.Stateful() {
-			if nid, err = l.Locate(ctx, uid, route.Group()); err != nil {
+			if nid, err = l.LocateNode(ctx, uid, route.Group()); err != nil {
 				return nil, err
 			}
+
 			if nid == prev {
 				return reply, err
 			}
+
 			prev = nid
 		}
 
-		ep, err = route.FindEndpoint(nid)
-		if err != nil {
+		if ep, err = route.FindEndpoint(nid); err != nil {
 			return nil, err
 		}
 
-		client, err = l.builder.Build(ep.Address())
-		if err != nil {
+		if client, err = l.builder.Build(ep.Address()); err != nil {
 			return nil, err
 		}
 
-		continued, reply, err = fn(ctx, client)
-		if continued {
+		if continued, reply, err = fn(ctx, client); continued {
 			if route.Stateful() {
 				l.doDeleteSource(uid, route.Group(), prev)
 			}
@@ -307,13 +329,13 @@ func (l *NodeLinker) doBuildClient(nid string) (*node.Client, error) {
 }
 
 // 打包消息
-func (l *NodeLinker) doPackMessage(message *Message, encrypt bool) ([]byte, error) {
-	buffer, err := l.toBuffer(message.Data, encrypt)
+func (l *NodeLinker) PackMessage(message *Message, encrypt bool) (*buffer.NocopyBuffer, error) {
+	buffer, err := l.PackBuffer(message.Data, encrypt)
 	if err != nil {
 		return nil, err
 	}
 
-	return packet.PackMessage(&packet.Message{
+	return packet.PackBuffer(&packet.Message{
 		Seq:    message.Seq,
 		Route:  message.Route,
 		Buffer: buffer,
@@ -321,7 +343,7 @@ func (l *NodeLinker) doPackMessage(message *Message, encrypt bool) ([]byte, erro
 }
 
 // 消息转buffer
-func (l *NodeLinker) toBuffer(message any, encrypt bool) ([]byte, error) {
+func (l *NodeLinker) PackBuffer(message any, encrypt bool) ([]byte, error) {
 	if message == nil {
 		return nil, nil
 	}
@@ -342,48 +364,83 @@ func (l *NodeLinker) toBuffer(message any, encrypt bool) ([]byte, error) {
 	return data, nil
 }
 
-// 保存用户节点来源
-func (l *NodeLinker) doSaveSource(uid int64, name, nid string) {
-	l.rw.Lock()
-	defer l.rw.Unlock()
+// 存储用户节点来源
+func (l *NodeLinker) doStoreSource(uid int64, name, nid string) {
+	wait, done := func() (bool, bool) {
+		l.rw.Lock()
+		defer l.rw.Unlock()
 
-	sources, ok := l.sources[uid]
-	if !ok {
-		sources = make(map[string]string)
-		l.sources[uid] = sources
+		if sources, ok := l.sources[uid]; ok {
+			if oldNID, ok := sources[name]; ok {
+				if oldNID == nid {
+					return false, false
+				} else {
+					sources[name] = nid
+
+					if l.opts.InsID == nid {
+						return false, true
+					} else {
+						return true, false
+					}
+				}
+			} else {
+				sources[name] = nid
+
+				return l.opts.InsID == nid, false
+			}
+		} else {
+			l.sources[uid] = map[string]string{name: nid}
+
+			return l.opts.InsID == nid, false
+		}
+	}()
+
+	if wait && l.opts.WaitHandler != nil {
+		l.opts.WaitHandler()
 	}
-	sources[name] = nid
+
+	if done && l.opts.DoneHandler != nil {
+		l.opts.DoneHandler()
+	}
 }
 
 // 删除用户节点来源
 func (l *NodeLinker) doDeleteSource(uid int64, name, nid string) {
-	l.rw.Lock()
-	defer l.rw.Unlock()
+	done := func() bool {
+		l.rw.Lock()
+		defer l.rw.Unlock()
 
-	sources, ok := l.sources[uid]
-	if !ok {
-		return
-	}
+		sources, ok := l.sources[uid]
+		if !ok {
+			return false
+		}
 
-	oldNID, ok := sources[name]
-	if !ok {
-		return
-	}
+		oldNID, ok := sources[name]
+		if !ok {
+			return false
+		}
 
-	// ignore mismatched NID
-	if oldNID != nid {
-		return
-	}
+		// ignore mismatched NID
+		if oldNID != nid {
+			return false
+		}
 
-	if len(sources) == 1 {
-		delete(l.sources, uid)
-	} else {
-		delete(sources, name)
+		if len(sources) == 1 {
+			delete(l.sources, uid)
+		} else {
+			delete(sources, name)
+		}
+
+		return oldNID == l.opts.InsID
+	}()
+
+	if done && l.opts.DoneHandler != nil {
+		l.opts.DoneHandler()
 	}
 }
 
 // 加载用户节点来源
-func (l *NodeLinker) doGetSource(uid int64, name string) (string, bool) {
+func (l *NodeLinker) doLoadSource(uid int64, name string) (string, bool) {
 	l.rw.RLock()
 	defer l.rw.RUnlock()
 
@@ -427,7 +484,7 @@ func (l *NodeLinker) WatchUserLocate() {
 			for _, event := range events {
 				switch event.Type {
 				case locate.BindNode:
-					l.doSaveSource(event.UID, event.InsName, event.InsID)
+					l.doStoreSource(event.UID, event.InsName, event.InsID)
 				case locate.UnbindNode:
 					l.doDeleteSource(event.UID, event.InsName, event.InsID)
 				default:

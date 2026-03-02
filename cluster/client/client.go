@@ -3,6 +3,9 @@ package client
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
+
 	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/component"
 	"github.com/dobyte/due/v2/core/info"
@@ -11,8 +14,6 @@ import (
 	"github.com/dobyte/due/v2/network"
 	"github.com/dobyte/due/v2/packet"
 	"github.com/dobyte/due/v2/utils/xcall"
-	"sync"
-	"sync/atomic"
 )
 
 type HookHandler func(proxy *Proxy)

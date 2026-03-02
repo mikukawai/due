@@ -7,24 +7,21 @@ import (
 	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/core/endpoint"
 	"github.com/dobyte/due/v2/errors"
+	"github.com/dobyte/due/v2/registry"
 )
 
 type Route struct {
 	abstract
-	id         int32         // 路由ID
-	group      string        // 路由所属组
-	stateful   bool          // 是否有状态
-	internal   bool          // 是否内部路由
-	counter    atomic.Uint64 // 轮询计数器
-	dispatcher *Dispatcher   // 分发器
+	route      registry.Route // 路由信息
+	group      string         // 路由所属组
+	counter    atomic.Uint64  // 轮询计数器
+	dispatcher *Dispatcher    // 分发器
 }
 
-func newRoute(dispatcher *Dispatcher, id int32, group string, stateful, internal bool) *Route {
+func newRoute(dispatcher *Dispatcher, group string, route registry.Route) *Route {
 	return &Route{
-		id:         id,
+		route:      route,
 		group:      group,
-		stateful:   stateful,
-		internal:   internal,
 		dispatcher: dispatcher,
 		abstract:   newAbstract(),
 	}
@@ -32,7 +29,7 @@ func newRoute(dispatcher *Dispatcher, id int32, group string, stateful, internal
 
 // ID 获取路由ID
 func (r *Route) ID() int32 {
-	return r.id
+	return r.route.ID
 }
 
 // Group 路由所属组
@@ -40,14 +37,19 @@ func (r *Route) Group() string {
 	return r.group
 }
 
-// Stateful 获取路由状态
-func (r *Route) Stateful() bool {
-	return r.stateful
-}
-
 // Internal 是否内部路由
 func (r *Route) Internal() bool {
-	return r.internal
+	return r.route.Internal
+}
+
+// Stateful 是否有状态路由
+func (r *Route) Stateful() bool {
+	return r.route.Stateful
+}
+
+// Authorized 是否授权路由
+func (r *Route) Authorized() bool {
+	return r.route.Authorized
 }
 
 // FindEndpoint 查询路由服务端点
@@ -68,7 +70,7 @@ func (r *Route) FindEndpoint(insID ...string) (*endpoint.Endpoint, error) {
 
 // 直接分配
 func (r *Route) directDispatch(insID string) (*endpoint.Endpoint, error) {
-	sep, ok := r.endpoints2[insID]
+	sep, ok := r.endpoints5[insID]
 	if !ok {
 		return nil, errors.ErrNotFoundEndpoint
 	}
@@ -78,8 +80,12 @@ func (r *Route) directDispatch(insID string) (*endpoint.Endpoint, error) {
 
 // 随机分配
 func (r *Route) randomDispatch() (*endpoint.Endpoint, error) {
-	if n := len(r.endpoints3); n > 0 {
-		return r.endpoints3[rand.IntN(n)].endpoint, nil
+	if n := len(r.endpoints1); n > 0 {
+		return r.endpoints1[rand.IntN(n)].endpoint, nil
+	}
+
+	if n := len(r.endpoints2); n > 0 {
+		return r.endpoints2[rand.IntN(n)].endpoint, nil
 	}
 
 	return nil, errors.ErrNotFoundEndpoint
@@ -87,13 +93,19 @@ func (r *Route) randomDispatch() (*endpoint.Endpoint, error) {
 
 // 轮询分配
 func (r *Route) roundRobinDispatch() (*endpoint.Endpoint, error) {
-	if len(r.endpoints3) == 0 {
-		return nil, errors.ErrNotFoundEndpoint
+	if n := len(r.endpoints1); n > 0 {
+		index := int(r.counter.Add(1) % uint64(n))
+
+		return r.endpoints1[index].endpoint, nil
 	}
 
-	index := int(r.counter.Add(1) % uint64(len(r.endpoints3)))
+	if n := len(r.endpoints2); n > 0 {
+		index := int(r.counter.Add(1) % uint64(n))
 
-	return r.endpoints3[index].endpoint, nil
+		return r.endpoints2[index].endpoint, nil
+	}
+
+	return nil, errors.ErrNotFoundEndpoint
 }
 
 // 加权轮询分配
@@ -103,22 +115,39 @@ func (r *Route) weightRoundRobinDispatch() (*endpoint.Endpoint, error) {
 		totalWeight int
 	)
 
-	for i := range r.endpoints3 {
-		se := r.endpoints3[i]
-		se.currWeight += se.weight
+	if len(r.endpoints1) > 0 {
+		for i := range r.endpoints1 {
+			se := r.endpoints1[i]
+			se.currWeight += se.weight
 
-		totalWeight += se.weight
+			totalWeight += se.weight
 
-		if selected == nil || se.currWeight > selected.currWeight {
-			selected = se
+			if selected == nil || se.currWeight > selected.currWeight {
+				selected = se
+			}
 		}
+
+		selected.currWeight -= totalWeight
+
+		return selected.endpoint, nil
 	}
 
-	if selected == nil {
-		return nil, errors.ErrNotFoundEndpoint
+	if len(r.endpoints2) > 0 {
+		for i := range r.endpoints2 {
+			se := r.endpoints2[i]
+			se.currWeight += se.weight
+
+			totalWeight += se.weight
+
+			if selected == nil || se.currWeight > selected.currWeight {
+				selected = se
+			}
+		}
+
+		selected.currWeight -= totalWeight
+
+		return selected.endpoint, nil
 	}
 
-	selected.currWeight -= totalWeight
-
-	return selected.endpoint, nil
+	return nil, errors.ErrNotFoundEndpoint
 }

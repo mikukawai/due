@@ -4,8 +4,6 @@ import (
 	"sync/atomic"
 )
 
-var defaultWriterPool = NewWriterPool([]int{32, 64, 128, 256, 512, 1024, 2048, 4096, 10240})
-
 type NocopyBuffer struct {
 	len      int          // 字节数
 	num      int          // 节点数
@@ -60,9 +58,21 @@ func (b *NocopyBuffer) Mount(block any, whence ...Whence) {
 	switch v := block.(type) {
 	case []byte:
 		if len(whence) > 0 && whence[0] == Head {
-			b.addToHead(&NocopyNode{buf: v})
+			b.addToHead(&NocopyNode{block: v})
 		} else {
-			b.addToTail(&NocopyNode{buf: v})
+			b.addToTail(&NocopyNode{block: v})
+		}
+	case *Bytes:
+		if len(whence) > 0 && whence[0] == Head {
+			b.addToHead(&NocopyNode{block: v})
+		} else {
+			b.addToTail(&NocopyNode{block: v})
+		}
+	case *Writer:
+		if len(whence) > 0 && whence[0] == Head {
+			b.addToHead(&NocopyNode{block: v})
+		} else {
+			b.addToTail(&NocopyNode{block: v})
 		}
 	default:
 		if len(whence) > 0 && whence[0] == Head {
@@ -73,17 +83,22 @@ func (b *NocopyBuffer) Mount(block any, whence ...Whence) {
 	}
 }
 
-// Malloc 分配一块内存给Writer
-func (b *NocopyBuffer) Malloc(cap int, whence ...Whence) *Writer {
-	writer := defaultWriterPool.Get(cap)
+// MallocBytes 分配一块内存给Bytes
+func (b *NocopyBuffer) MallocBytes(cap int, whence ...Whence) *Bytes {
+	block := MallocBytes(cap)
 
-	if len(whence) > 0 && whence[0] == Head {
-		b.addToHead(&NocopyNode{buf: writer, pool: defaultWriterPool})
-	} else {
-		b.addToTail(&NocopyNode{buf: writer, pool: defaultWriterPool})
-	}
+	b.Mount(block)
 
-	return writer
+	return block
+}
+
+// MallocWriter 分配一块内存给Writer
+func (b *NocopyBuffer) MallocWriter(cap int, whence ...Whence) *Writer {
+	block := MallocWriter(cap)
+
+	b.Mount(block)
+
+	return block
 }
 
 // Visit 迭代
@@ -158,30 +173,33 @@ func (b *NocopyBuffer) Delay(delay int32) {
 }
 
 // Release 释放
-func (b *NocopyBuffer) Release(force ...bool) {
-	if (len(force) > 0 && force[0]) || b.delay.Add(-1) <= 0 {
-		if b.released.CompareAndSwap(false, true) {
-			for node := b.head; node != nil; {
-				switch n := node.(type) {
-				case *NocopyNode:
-					next := n.next
-					n.Release()
-					node = next
-				case *NocopyBuffer:
-					next := n.next
-					n.Release(force...)
-					node = next
-				}
-			}
-			b.len = -1
-			b.num = 0
-			b.head = nil
-			b.tail = nil
-			b.prev = nil
-			b.next = nil
-			b.delay.Store(0)
+func (b *NocopyBuffer) Release() {
+	if b.delay.Add(-1) > 0 {
+		return
+	}
+
+	if !b.released.CompareAndSwap(false, true) {
+		return
+	}
+
+	for node := b.head; node != nil; {
+		switch n := node.(type) {
+		case *NocopyNode:
+			next := n.next
+			n.Release()
+			node = next
+		case *NocopyBuffer:
+			next := n.next
+			n.Release()
+			node = next
 		}
 	}
+	b.len = -1
+	b.num = 0
+	b.head = nil
+	b.tail = nil
+	b.prev = nil
+	b.next = nil
 }
 
 // 添加到头部

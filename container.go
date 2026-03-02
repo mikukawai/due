@@ -19,7 +19,7 @@ import (
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/task"
 	"github.com/dobyte/due/v2/utils/xcall"
-	"github.com/dobyte/due/v2/utils/xfile"
+	"github.com/dobyte/due/v2/utils/xos"
 )
 
 const (
@@ -42,7 +42,7 @@ func (c *Container) Add(components ...component.Component) {
 }
 
 // Serve 启动容器
-func (c *Container) Serve() {
+func (c *Container) Serve(once ...bool) {
 	c.doSaveProcessID()
 
 	c.doPrintFrameworkInfo()
@@ -51,7 +51,9 @@ func (c *Container) Serve() {
 
 	c.doStartComponents()
 
-	c.doWaitSystemSignal()
+	if len(once) == 0 || !once[0] {
+		c.doWaitSystemSignal()
+	}
 
 	c.doCloseComponents()
 
@@ -144,7 +146,7 @@ func (c *Container) doSaveProcessID() {
 		return
 	}
 
-	if err := xfile.WriteFile(filename, []byte(strconv.Itoa(syscall.Getpid()))); err != nil {
+	if err := xos.WriteFile(filename, []byte(strconv.Itoa(syscall.Getpid()))); err != nil {
 		log.Fatalf("pid save failed: %v", err)
 	}
 }

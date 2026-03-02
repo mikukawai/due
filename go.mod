@@ -4,21 +4,21 @@ go 1.25.0
 
 require (
 	dario.cat/mergo v1.0.2
-	github.com/BurntSushi/toml v1.5.0
-	github.com/bytedance/sonic v1.14.1
+	github.com/BurntSushi/toml v1.6.0
+	github.com/bytedance/sonic v1.14.2
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0
 	github.com/jinzhu/copier v0.4.0
-	github.com/panjf2000/ants/v2 v2.11.3
-	github.com/shamaton/msgpack/v2 v2.2.3
-	golang.org/x/sync v0.17.0
-	google.golang.org/protobuf v1.36.9
+	github.com/panjf2000/ants/v2 v2.11.4
+	github.com/shamaton/msgpack/v2 v2.4.0
+	golang.org/x/sync v0.19.0
+	google.golang.org/protobuf v1.36.6
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
-	github.com/bytedance/sonic/loader v0.3.0 // indirect
+	github.com/bytedance/sonic/loader v0.4.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/google/go-cmp v0.7.0 // indirect

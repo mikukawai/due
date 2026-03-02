@@ -1,13 +1,14 @@
 package tcp_test
 
 import (
+	"net/http"
+	_ "net/http/pprof"
+	"testing"
+
 	"github.com/dobyte/due/network/tcp/v2"
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/network"
 	"github.com/dobyte/due/v2/packet"
-	"net/http"
-	_ "net/http/pprof"
-	"testing"
 )
 
 func TestServer_Simple(t *testing.T) {
@@ -29,8 +30,8 @@ func TestServer_Simple(t *testing.T) {
 		log.Infof("connection is closed, connection id: %d", conn.ID())
 	})
 
-	server.OnReceive(func(conn network.Conn, msg []byte) {
-		message, err := packet.UnpackMessage(msg)
+	server.OnReceive(func(conn network.Conn, data []byte) {
+		message, err := packet.UnpackMessage(data)
 		if err != nil {
 			log.Errorf("unpack message failed: %v", err)
 			return
@@ -38,7 +39,7 @@ func TestServer_Simple(t *testing.T) {
 
 		log.Infof("receive message from client, cid: %d, seq: %d, route: %d, msg: %s", conn.ID(), message.Seq, message.Route, string(message.Buffer))
 
-		msg, err = packet.PackMessage(&packet.Message{
+		msg, err := packet.PackMessage(&packet.Message{
 			Seq:    1,
 			Route:  1,
 			Buffer: []byte("I'm fine~~"),
@@ -69,14 +70,14 @@ func TestServer_Benchmark(t *testing.T) {
 		log.Info("server is started")
 	})
 
-	server.OnReceive(func(conn network.Conn, msg []byte) {
-		message, err := packet.UnpackMessage(msg)
+	server.OnReceive(func(conn network.Conn, data []byte) {
+		message, err := packet.UnpackMessage(data)
 		if err != nil {
 			log.Errorf("unpack message failed: %v", err)
 			return
 		}
 
-		data, err := packet.PackMessage(&packet.Message{
+		msg, err := packet.PackMessage(&packet.Message{
 			Seq:    message.Seq,
 			Route:  message.Route,
 			Buffer: message.Buffer,
@@ -86,7 +87,7 @@ func TestServer_Benchmark(t *testing.T) {
 			return
 		}
 
-		if err = conn.Push(data); err != nil {
+		if err = conn.Push(msg); err != nil {
 			log.Errorf("push message failed: %v", err)
 			return
 		}

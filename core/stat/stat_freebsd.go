@@ -1,4 +1,7 @@
-package xfile
+//go:build freebsd
+// +build freebsd
+
+package stat
 
 import (
 	"syscall"

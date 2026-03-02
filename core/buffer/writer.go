@@ -3,23 +3,29 @@ package buffer
 import (
 	"encoding/binary"
 	"math"
+	"sync"
 )
 
 type Writer struct {
-	buf []byte
-	off int
+	buf  []byte
+	off  int
+	pool *sync.Pool
 }
 
-func NewWriter(cap ...int) *Writer {
-	w := &Writer{}
+var _ Buffer = (*Writer)(nil)
 
+// NewWriter 以指定buf创建写入器
+func NewWriter(buf []byte) *Writer {
+	return &Writer{buf: buf}
+}
+
+// NewWriterWithCapacity 以指定容量创建写入器
+func NewWriterWithCapacity(cap ...int) *Writer {
 	if len(cap) > 0 {
-		w.buf = make([]byte, cap[0])
+		return &Writer{buf: make([]byte, cap[0])}
 	} else {
-		w.buf = make([]byte, 0)
+		return &Writer{buf: make([]byte, 0)}
 	}
-
-	return w
 }
 
 // Len 返回数据长度
@@ -42,15 +48,18 @@ func (w *Writer) Bytes() []byte {
 	return w.buf[:w.off]
 }
 
-// Reset 复位
-func (w *Writer) Reset() {
-	w.off = 0
-	w.buf = w.buf[:0]
-}
-
 // Grow 增长空间
 func (w *Writer) Grow(n int) {
 	w.growSlice(n)
+}
+
+// Release 释放
+func (w *Writer) Release() {
+	w.off = 0
+
+	if w.pool != nil {
+		w.pool.Put(w)
+	}
 }
 
 // 写数据，实现io.Writer
@@ -183,7 +192,7 @@ func (w *Writer) WriteBytes(values ...byte) {
 
 // 执行扩容操作
 func (w *Writer) grow(n int) {
-	if w.off+n < len(w.buf) {
+	if w.off+n < cap(w.buf) {
 		return
 	}
 

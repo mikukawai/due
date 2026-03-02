@@ -2,12 +2,13 @@ package protocol
 
 import (
 	"encoding/binary"
+	"io"
+
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/internal/transporter/internal/codes"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
 	"github.com/dobyte/due/v2/session"
-	"io"
 )
 
 const (
@@ -17,10 +18,10 @@ const (
 
 // EncodeMulticastReq 编码组播请求（最多组播65535个对象）
 // 协议：size + header + route + seq + session kind + count + targets + <message packet>
-func EncodeMulticastReq(seq uint64, kind session.Kind, targets []int64, message buffer.Buffer) buffer.Buffer {
+func EncodeMulticastReq(seq uint64, kind session.Kind, targets []int64, message buffer.Buffer) *buffer.NocopyBuffer {
 	size := multicastReqBytes + len(targets)*8
-	buf := buffer.NewNocopyBuffer()
-	writer := buf.Malloc(size)
+
+	writer := buffer.MallocWriter(size)
 	writer.WriteUint32s(binary.BigEndian, uint32(size-defaultSizeBytes+message.Len()))
 	writer.WriteUint8s(dataBit)
 	writer.WriteUint8s(route.Multicast)
@@ -28,9 +29,8 @@ func EncodeMulticastReq(seq uint64, kind session.Kind, targets []int64, message 
 	writer.WriteUint8s(uint8(kind))
 	writer.WriteUint16s(binary.BigEndian, uint16(len(targets)))
 	writer.WriteInt64s(binary.BigEndian, targets...)
-	buf.Mount(message)
 
-	return buf
+	return buffer.NewNocopyBuffer(writer, message)
 }
 
 // DecodeMulticastReq 解码组播请求
@@ -69,14 +69,13 @@ func DecodeMulticastReq(data []byte) (seq uint64, kind session.Kind, targets []i
 
 // EncodeMulticastRes 编码组播响应
 // 协议：size + header + route + seq + code + [total]
-func EncodeMulticastRes(seq uint64, code uint16, total ...uint64) buffer.Buffer {
+func EncodeMulticastRes(seq uint64, code uint16, total ...uint64) *buffer.NocopyBuffer {
 	size := multicastResBytes - defaultSizeBytes
 	if code != codes.OK || len(total) == 0 || total[0] == 0 {
 		size -= b64
 	}
 
-	buf := buffer.NewNocopyBuffer()
-	writer := buf.Malloc(multicastResBytes)
+	writer := buffer.MallocWriter(multicastResBytes)
 	writer.WriteUint32s(binary.BigEndian, uint32(size))
 	writer.WriteUint8s(dataBit)
 	writer.WriteUint8s(route.Multicast)
@@ -87,7 +86,7 @@ func EncodeMulticastRes(seq uint64, code uint16, total ...uint64) buffer.Buffer 
 		writer.WriteUint64s(binary.BigEndian, total[0])
 	}
 
-	return buf
+	return buffer.NewNocopyBuffer(writer)
 }
 
 // DecodeMulticastRes 解码组播响应

@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/dobyte/due/v2/cluster"
+	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/internal/transporter/internal/client"
 	"github.com/dobyte/due/v2/internal/transporter/internal/codes"
 	"github.com/dobyte/due/v2/internal/transporter/internal/protocol"
@@ -27,22 +28,22 @@ func (c *Client) Trigger(ctx context.Context, event cluster.Event, cid, uid int6
 }
 
 // Deliver 投递消息
-func (c *Client) Deliver(ctx context.Context, cid, uid int64, message []byte) error {
-	return c.cli.Send(ctx, protocol.EncodeDeliverReq(0, cid, uid, message), cid)
+func (c *Client) Deliver(ctx context.Context, cid, uid int64, buf buffer.Buffer) error {
+	return c.cli.Send(ctx, protocol.EncodeDeliverReq(0, cid, uid, buf), cid)
 }
 
 // GetState 获取状态
 func (c *Client) GetState(ctx context.Context) (cluster.State, error) {
 	seq := c.doGenSequence()
-
 	buf := protocol.EncodeGetStateReq(seq)
 
 	res, err := c.cli.Call(ctx, seq, buf)
 	if err != nil {
 		return 0, err
 	}
+	defer res.Release()
 
-	code, state, err := protocol.DecodeGetStateRes(res)
+	code, state, err := protocol.DecodeGetStateRes(res.Bytes())
 	if err != nil {
 		return 0, err
 	}
@@ -53,15 +54,15 @@ func (c *Client) GetState(ctx context.Context) (cluster.State, error) {
 // SetState 设置状态
 func (c *Client) SetState(ctx context.Context, state cluster.State) error {
 	seq := c.doGenSequence()
-
 	buf := protocol.EncodeSetStateReq(seq, state)
 
 	res, err := c.cli.Call(ctx, seq, buf)
 	if err != nil {
 		return err
 	}
+	defer res.Release()
 
-	code, err := protocol.DecodeSetStateRes(res)
+	code, err := protocol.DecodeSetStateRes(res.Bytes())
 	if err != nil {
 		return err
 	}

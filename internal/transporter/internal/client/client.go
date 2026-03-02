@@ -8,58 +8,94 @@ import (
 
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
-)
-
-const (
-	ordered   = 20 // 有序消息连接数
-	unordered = 10 // 无序消息连接数
+	"github.com/dobyte/due/v2/log"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
 	defaultTimeout = 3 * time.Second // 调用超时时间
+	defaultConnNum = 10              // 默认连接数
 )
 
 type chWrite struct {
-	ctx  context.Context // 上下文
-	seq  uint64          // 序列号
-	buf  buffer.Buffer   // 数据buffer
-	call chan []byte     // 回调数据
+	seq  uint64               // 序列号
+	buf  *buffer.NocopyBuffer // 数据buffer
+	call chan buffer.Buffer   // 回调数据
 }
 
 type Client struct {
-	opts        *Options       // 配置
-	chWrite     chan *chWrite  // 写入队列
-	connections []*Conn        // 连接
-	wg          sync.WaitGroup // 等待组
-	closed      atomic.Bool    // 已关闭
+	opts   *Options       // 配置
+	conns  []*Conn        // 连接
+	queue  chan *chWrite  // 无序队列
+	wg     sync.WaitGroup // 等待组
+	closed atomic.Bool    // 已关闭
+	pool   sync.Pool      // 连接池
 }
 
 func NewClient(opts *Options) *Client {
 	c := &Client{}
 	c.opts = opts
-	c.chWrite = make(chan *chWrite, 10240)
-	c.connections = make([]*Conn, 0, ordered+unordered)
-	c.init()
+	c.conns = make([]*Conn, 0, defaultConnNum)
+	c.queue = make(chan *chWrite, 10240)
+	c.closed.Store(true)
+	c.pool = sync.Pool{New: func() any { return &chWrite{} }}
 
 	return c
 }
 
+// Establish 新建连接
+func (c *Client) Establish() error {
+	c.wg.Add(defaultConnNum)
+
+	go c.wait()
+
+	var (
+		mu    sync.Mutex
+		eg, _ = errgroup.WithContext(context.Background())
+	)
+
+	for range defaultConnNum {
+		eg.Go(func() error {
+			conn := newConn(c)
+
+			if err := conn.dial(); err != nil {
+				log.Warnf("conn dial failed: %v", err)
+				return err
+			}
+
+			mu.Lock()
+			c.conns = append(c.conns, conn)
+			mu.Unlock()
+
+			return nil
+		})
+	}
+
+	if err := eg.Wait(); err != nil && len(c.conns) == 0 {
+		return err
+	}
+
+	c.closed.Store(false)
+
+	return nil
+}
+
 // Call 调用
-func (c *Client) Call(ctx context.Context, seq uint64, buf buffer.Buffer, idx ...int64) ([]byte, error) {
+func (c *Client) Call(ctx context.Context, seq uint64, buf *buffer.NocopyBuffer, idx ...int64) (buffer.Buffer, error) {
 	if c.closed.Load() {
+		buf.Release()
 		return nil, errors.ErrClientClosed
 	}
 
-	call := make(chan []byte)
+	ch := c.pool.Get().(*chWrite)
+	ch.seq = seq
+	ch.buf = buf
+	ch.call = make(chan buffer.Buffer)
 
 	conn := c.load(idx...)
 
-	if err := conn.send(&chWrite{
-		ctx:  ctx,
-		seq:  seq,
-		buf:  buf,
-		call: call,
-	}); err != nil {
+	if err := conn.send(ch, len(idx) > 0); err != nil {
+		c.release(ch)
 		return nil, err
 	}
 
@@ -68,52 +104,61 @@ func (c *Client) Call(ctx context.Context, seq uint64, buf buffer.Buffer, idx ..
 
 	select {
 	case <-ctx.Done():
-		conn.cancel(seq)
+		conn.delete(seq)
 		return nil, ctx.Err()
 	case <-tctx.Done():
-		conn.cancel(seq)
+		conn.delete(seq)
 		return nil, tctx.Err()
-	case data := <-call:
-		return data, nil
+	case res, ok := <-ch.call:
+		if !ok {
+			return nil, errors.ErrConnectionHanged
+		}
+
+		return res, nil
 	}
 }
 
 // Send 发送
-func (c *Client) Send(ctx context.Context, buf buffer.Buffer, idx ...int64) error {
+func (c *Client) Send(ctx context.Context, buf *buffer.NocopyBuffer, idx ...int64) error {
 	if c.closed.Load() {
+		buf.Release()
 		return errors.ErrClientClosed
 	}
 
+	ch := c.pool.Get().(*chWrite)
+	ch.buf = buf
+
 	conn := c.load(idx...)
 
-	return conn.send(&chWrite{
-		ctx: ctx,
-		buf: buf,
-	})
+	if err := conn.send(ch, len(idx) > 0); err != nil {
+		c.release(ch)
+		return err
+	}
+
+	return nil
 }
 
 // 获取连接
 func (c *Client) load(idx ...int64) *Conn {
 	if len(idx) > 0 {
-		return c.connections[idx[0]%ordered]
+		return c.conns[idx[0]%int64(len(c.conns))]
 	} else {
-		return c.connections[ordered]
+		return c.conns[0]
 	}
 }
 
-// 新建连接
-func (c *Client) init() {
-	c.wg.Add(ordered + unordered)
-
-	go c.wait()
-
-	for range ordered {
-		c.connections = append(c.connections, newConn(c))
+// 释放
+func (c *Client) release(ch *chWrite) {
+	if ch.buf == nil {
+		return
 	}
 
-	for range unordered {
-		c.connections = append(c.connections, newConn(c, c.chWrite))
-	}
+	ch.buf.Release()
+	ch.buf = nil
+	ch.seq = 0
+	ch.call = nil
+
+	c.pool.Put(ch)
 }
 
 // 连接断开
@@ -125,10 +170,9 @@ func (c *Client) done() {
 func (c *Client) wait() {
 	c.wg.Wait()
 	c.closed.Store(true)
-	c.connections = nil
 
 	time.AfterFunc(time.Second, func() {
-		close(c.chWrite)
+		close(c.queue)
 	})
 
 	if c.opts.CloseHandler != nil {

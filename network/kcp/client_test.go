@@ -2,20 +2,21 @@ package kcp_test
 
 import (
 	"fmt"
-	"github.com/dobyte/due/network/kcp/v2"
-	"github.com/dobyte/due/v2/log"
-	"github.com/dobyte/due/v2/network"
-	"github.com/dobyte/due/v2/packet"
-	"github.com/dobyte/due/v2/utils/xrand"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dobyte/due/network/kcp/v2"
+	"github.com/dobyte/due/v2/log"
+	"github.com/dobyte/due/v2/network"
+	"github.com/dobyte/due/v2/packet"
+	"github.com/dobyte/due/v2/utils/xrand"
 )
 
 func TestClient_Simple(t *testing.T) {
-	client := kcp.NewClient()
+	client := kcp.NewClient(kcp.WithClientHeartbeatInterval(0))
 
 	client.OnConnect(func(conn network.Conn) {
 		log.Info("connection is opened")
@@ -25,8 +26,8 @@ func TestClient_Simple(t *testing.T) {
 		log.Info("connection is closed")
 	})
 
-	client.OnReceive(func(conn network.Conn, msg []byte) {
-		message, err := packet.UnpackMessage(msg)
+	client.OnReceive(func(conn network.Conn, data []byte) {
+		message, err := packet.UnpackMessage(data)
 		if err != nil {
 			log.Errorf("unpack message failed: %v", err)
 			return
@@ -40,6 +41,8 @@ func TestClient_Simple(t *testing.T) {
 		log.Fatalf("client dial failed: %v", err)
 	}
 	defer conn.Close()
+
+	time.Sleep(10 * time.Second)
 
 	counter := 0
 
@@ -65,6 +68,10 @@ func TestClient_Simple(t *testing.T) {
 			}
 
 			counter++
+
+			if counter%5 == 0 {
+				conn.Close()
+			}
 
 			if counter >= 200 {
 				return
@@ -138,7 +145,7 @@ func doPressureTest(c int, n int, size int) {
 
 	client := kcp.NewClient(kcp.WithClientHeartbeatInterval(0))
 
-	client.OnReceive(func(conn network.Conn, msg []byte) {
+	client.OnReceive(func(conn network.Conn, data []byte) {
 		atomic.AddInt64(&totalRecv, 1)
 
 		wg.Done()

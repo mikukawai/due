@@ -1,44 +1,70 @@
 package buffer
 
 import (
+	"math"
 	"sync"
 )
 
-type WriterPool struct {
-	pools      []*sync.Pool
-	capacities []int
+var defaultWriterPool = NewWriterPool(32)
+
+// MallocWriter 分配一块内存给Writer
+func MallocWriter(cap int) *Writer {
+	return defaultWriterPool.Get(cap)
 }
 
-func NewWriterPool(capacities []int) *WriterPool {
+type WriterPool struct {
+	pools []*sync.Pool
+}
+
+// NewWriterPool 分级创建写入器池
+func NewWriterPool(grade int) *WriterPool {
 	p := &WriterPool{}
-	p.pools = make([]*sync.Pool, len(capacities))
-	p.capacities = capacities
-	for i := range capacities {
-		c := capacities[i]
-		p.pools[i] = &sync.Pool{New: func() any { return NewWriter(c) }}
+	p.pools = make([]*sync.Pool, grade+1)
+
+	for i := range grade + 1 {
+		cap := 1 << i
+		pool := &sync.Pool{}
+		pool.New = func() any { return &Writer{buf: make([]byte, cap), pool: pool} }
+		p.pools[i] = pool
 	}
 
 	return p
 }
 
+// NewWriterPoolWithCapacity 以指定容量创建写入器池
+func NewWriterPoolWithCapacity(cap int) *WriterPool {
+	return NewWriterPool(int(math.Ceil(math.Log2(float64(cap)))))
+}
+
 // Get 获取
 func (p *WriterPool) Get(cap int) *Writer {
 	pool := p.getPool(cap)
+
+	if pool == nil {
+		return nil
+	}
+
 	return pool.Get().(*Writer)
 }
 
 // Put 放回
 func (p *WriterPool) Put(w *Writer) {
 	pool := p.getPool(w.Cap())
+
+	if pool == nil {
+		return
+	}
+
 	pool.Put(w)
 }
 
 // 获取对象池
 func (p *WriterPool) getPool(cap int) *sync.Pool {
-	for i, c := range p.capacities {
-		if cap <= c {
-			return p.pools[i]
-		}
+	if len(p.pools) == 0 {
+		return nil
 	}
-	return p.pools[len(p.pools)-1]
+
+	i := min(int(math.Ceil(math.Log2(float64(cap)))), len(p.pools)-1)
+
+	return p.pools[i]
 }

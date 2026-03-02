@@ -20,19 +20,26 @@ type Proxy struct {
 }
 
 func newProxy(node *Node) *Proxy {
-	opts := &link.Options{
-		InsID:     node.opts.id,
-		InsKind:   cluster.Node,
-		Codec:     node.opts.codec,
-		Locator:   node.opts.locator,
-		Registry:  node.opts.registry,
-		Encryptor: node.opts.encryptor,
-	}
-
 	return &Proxy{
-		node:       node,
-		gateLinker: link.NewGateLinker(node.opts.ctx, opts),
-		nodeLinker: link.NewNodeLinker(node.opts.ctx, opts),
+		node: node,
+		gateLinker: link.NewGateLinker(node.opts.ctx, &link.Options{
+			InsID:     node.opts.id,
+			InsKind:   cluster.Node,
+			Codec:     node.opts.codec,
+			Locator:   node.opts.locator,
+			Registry:  node.opts.registry,
+			Encryptor: node.opts.encryptor,
+		}),
+		nodeLinker: link.NewNodeLinker(node.opts.ctx, &link.Options{
+			InsID:       node.opts.id,
+			InsKind:     cluster.Node,
+			Codec:       node.opts.codec,
+			Locator:     node.opts.locator,
+			Registry:    node.opts.registry,
+			Encryptor:   node.opts.encryptor,
+			WaitHandler: node.addWait,
+			DoneHandler: node.doneWait,
+		}),
 	}
 }
 
@@ -72,13 +79,8 @@ func (p *Proxy) Trigger() *Trigger {
 }
 
 // AddRouteHandler 添加路由处理器
-func (p *Proxy) AddRouteHandler(route int32, stateful bool, handler RouteHandler, middlewares ...MiddlewareHandler) {
-	p.node.router.AddRouteHandler(route, stateful, handler, middlewares...)
-}
-
-// AddInternalRouteHandler 添加内部路由处理器（node节点间路由消息处理）
-func (p *Proxy) AddInternalRouteHandler(route int32, stateful bool, handler RouteHandler, middlewares ...MiddlewareHandler) {
-	p.node.router.AddInternalRouteHandler(route, stateful, handler, middlewares...)
+func (p *Proxy) AddRouteHandler(route int32, handler RouteHandler, opts ...RouteOptions) {
+	p.node.router.AddRouteHandler(route, handler, opts...)
 }
 
 // SetDefaultRouteHandler 设置默认路由处理器，所有未注册的路由均走默认路由处理器
@@ -114,14 +116,54 @@ func (p *Proxy) NewMeshClient(target string) (transport.Client, error) {
 	return p.node.opts.transporter.NewClient(target)
 }
 
+// HasGate 检测是否存在某个网关
+func (p *Proxy) HasGate(gid string) bool {
+	return p.gateLinker.HasGate(gid)
+}
+
+// AskGate 检测用户是否在给定的网关上
+func (p *Proxy) AskGate(ctx context.Context, gid string, uid int64) (string, bool, error) {
+	return p.gateLinker.AskGate(ctx, gid, uid)
+}
+
+// LocateGate 定位用户所在网关
+func (p *Proxy) LocateGate(ctx context.Context, uid int64) (string, error) {
+	return p.gateLinker.LocateGate(ctx, uid)
+}
+
 // BindGate 绑定网关
 func (p *Proxy) BindGate(ctx context.Context, gid string, cid, uid int64) error {
-	return p.gateLinker.Bind(ctx, gid, cid, uid)
+	return p.gateLinker.BindGate(ctx, gid, cid, uid)
 }
 
 // UnbindGate 解绑网关
 func (p *Proxy) UnbindGate(ctx context.Context, uid int64) error {
-	return p.gateLinker.Unbind(ctx, uid)
+	return p.gateLinker.UnbindGate(ctx, uid)
+}
+
+// FetchGateList 拉取网关列表
+func (p *Proxy) FetchGateList(ctx context.Context, states ...cluster.State) ([]*registry.ServiceInstance, error) {
+	return p.gateLinker.FetchGateList(ctx, states...)
+}
+
+// HasNode 检测是否存在某个节点
+func (p *Proxy) HasNode(nid string) bool {
+	return p.nodeLinker.HasNode(nid)
+}
+
+// AskNode 检测用户是否在给定的节点上
+func (p *Proxy) AskNode(ctx context.Context, uid int64, name, nid string) (string, bool, error) {
+	return p.nodeLinker.AskNode(ctx, uid, name, nid)
+}
+
+// LocateNode 定位用户所在节点
+func (p *Proxy) LocateNode(ctx context.Context, uid int64, name string) (string, error) {
+	return p.nodeLinker.LocateNode(ctx, uid, name)
+}
+
+// LocateNodes 定位用户所在节点列表
+func (p *Proxy) LocateNodes(ctx context.Context, uid int64) (map[string]string, error) {
+	return p.nodeLinker.LocateNodes(ctx, uid)
 }
 
 // BindNode 绑定节点
@@ -134,15 +176,7 @@ func (p *Proxy) BindNode(ctx context.Context, uid int64, nameAndNID ...string) e
 		name, nid = nameAndNID[0], nameAndNID[1]
 	}
 
-	if err := p.nodeLinker.Bind(ctx, uid, name, nid); err != nil {
-		return err
-	}
-
-	if nid == p.node.opts.id {
-		p.node.addWait()
-	}
-
-	return nil
+	return p.nodeLinker.BindNode(ctx, uid, name, nid)
 }
 
 // UnbindNode 解绑节点
@@ -155,50 +189,7 @@ func (p *Proxy) UnbindNode(ctx context.Context, uid int64, nameAndNID ...string)
 		name, nid = nameAndNID[0], nameAndNID[1]
 	}
 
-	if err := p.nodeLinker.Unbind(ctx, uid, name, nid); err != nil {
-		return err
-	}
-
-	if nid == p.node.opts.id {
-		p.node.doneWait()
-	}
-
-	return nil
-}
-
-// LocateGate 定位用户所在网关
-func (p *Proxy) LocateGate(ctx context.Context, uid int64) (string, error) {
-	return p.gateLinker.Locate(ctx, uid)
-}
-
-// AskGate 检测用户是否在给定的网关上
-func (p *Proxy) AskGate(ctx context.Context, gid string, uid int64) (string, bool, error) {
-	return p.gateLinker.Ask(ctx, gid, uid)
-}
-
-// HasGate 检测是否存在某个网关
-func (p *Proxy) HasGate(gid string) bool {
-	return p.gateLinker.Has(gid)
-}
-
-// LocateNode 定位用户所在节点
-func (p *Proxy) LocateNode(ctx context.Context, uid int64, name string) (string, error) {
-	return p.nodeLinker.Locate(ctx, uid, name)
-}
-
-// AskNode 检测用户是否在给定的节点上
-func (p *Proxy) AskNode(ctx context.Context, uid int64, name, nid string) (string, bool, error) {
-	return p.nodeLinker.Ask(ctx, uid, name, nid)
-}
-
-// HasNode 检测是否存在某个节点
-func (p *Proxy) HasNode(nid string) bool {
-	return p.nodeLinker.Has(nid)
-}
-
-// FetchGateList 拉取网关列表
-func (p *Proxy) FetchGateList(ctx context.Context, states ...cluster.State) ([]*registry.ServiceInstance, error) {
-	return p.gateLinker.FetchGateList(ctx, states...)
+	return p.nodeLinker.UnbindNode(ctx, uid, name, nid)
 }
 
 // FetchNodeList 拉取节点列表
@@ -252,22 +243,26 @@ func (p *Proxy) Disconnect(ctx context.Context, args *cluster.DisconnectArgs) er
 }
 
 // Push 推送消息
+// args.Ack设为true时可获得消息真实发送的情况
 func (p *Proxy) Push(ctx context.Context, args *cluster.PushArgs) error {
 	return p.gateLinker.Push(ctx, args)
 }
 
 // Multicast 推送组播消息
-func (p *Proxy) Multicast(ctx context.Context, args *cluster.MulticastArgs) error {
+// 要想获得推送成功的目标数，需将args.Ack设为true
+func (p *Proxy) Multicast(ctx context.Context, args *cluster.MulticastArgs) (int64, error) {
 	return p.gateLinker.Multicast(ctx, args)
 }
 
 // Broadcast 推送广播消息
-func (p *Proxy) Broadcast(ctx context.Context, args *cluster.BroadcastArgs) error {
+// 要想获得推送成功的目标数，需将args.Ack设为true
+func (p *Proxy) Broadcast(ctx context.Context, args *cluster.BroadcastArgs) (int64, error) {
 	return p.gateLinker.Broadcast(ctx, args)
 }
 
 // Publish 发布消息
-func (p *Proxy) Publish(ctx context.Context, args *cluster.PublishArgs) error {
+// 要想获得推送成功的目标数，需将args.Ack设为true
+func (p *Proxy) Publish(ctx context.Context, args *cluster.PublishArgs) (int64, error) {
 	return p.gateLinker.Publish(ctx, args)
 }
 
@@ -288,10 +283,10 @@ func (p *Proxy) Deliver(ctx context.Context, args *cluster.DeliverArgs) error {
 	}
 
 	return p.nodeLinker.Deliver(ctx, &link.DeliverArgs{
-		NID:     args.NID,
-		UID:     args.UID,
-		Route:   args.Message.Route,
-		Message: args.Message,
+		NID:    args.NID,
+		UID:    args.UID,
+		Route:  args.Message.Route,
+		Buffer: args.Message,
 	})
 }
 

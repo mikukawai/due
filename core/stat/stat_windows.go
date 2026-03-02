@@ -1,4 +1,7 @@
-package xfile
+//go:build windows
+// +build windows
+
+package stat
 
 import (
 	"syscall"
