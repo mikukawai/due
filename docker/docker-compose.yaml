@@ -41,24 +41,26 @@ services:
     networks:
       - middleware
   etcd:
-    image: bitnami/etcd:latest
+    image: quay.io/coreos/etcd:v3.5.21
     container_name: dev-etcd
     platform: linux/x86_64
     restart: always
     environment:
-      - ALLOW_NONE_AUTHENTICATION=yes
-      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_CLUSTER=default=http://0.0.0.0:2380
     ports:
       - '2379:2379'
       - '2380:2380'
     networks:
       - middleware
   consul:
-    image: bitnami/consul:latest
+    image: hashicorp/consul:1.20
     container_name: dev-consul
     platform: linux/x86_64
     restart: always
-    user: root
     ports:
       - '8300:8300'
       - '8301:8301'
@@ -67,7 +69,7 @@ services:
       - '8600:8600'
       - '8600:8600/udp'
     volumes:
-      - ./consul:/bitnami/consul
+      - ./consul:/consul/data
   nacos:
     image: nacos/nacos-server:latest
     container_name: dev-nacos
