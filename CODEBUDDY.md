@@ -4,7 +4,7 @@ This file provides guidance to CodeBuddy Code when working with code in this rep
 
 ## 项目简介
 
-due 是一个基于 Go 语言开发的高性能分布式游戏服务器框架。根目录是主模块 `github.com/dobyte/due/v2`，模块设计借鉴了 kratos，采用组件化 + 集群化的架构。当前分支对应 v2.5.1，go.mod 要求 `go 1.25.0`。
+due 是一个基于 Go 语言开发的高性能分布式游戏服务器框架。根目录是主模块 `github.com/dobyte/due/v2`，模块设计借鉴了 kratos，采用组件化 + 集群化的架构。当前分支对应 v2.5.8，go.mod 要求 `go 1.25.0`。
 
 ## 常用命令
 
@@ -52,7 +52,7 @@ container.Serve()                     // 启动
 - **Mesh 微服务**（`cluster/mesh`）：无状态微服务，供 grpc/rpcx 场景使用，能力是 Node 的子集。
 - **Client**（`cluster/client`）：调试用的客户端组件，可直连 Gate 验证全流程。
 
-每个集群组件对外暴露 `Proxy` 给业务层（如 `proxy.Router().AddRouteHandler(route, stateful, handler)`、`proxy.AddHookListener(cluster.Start, ...)`）。集群常量（Kind/State/Event/Hook/消息参数结构体）统一定义在 `cluster/cluster.go`。
+每个集群组件对外暴露 `Proxy` 给业务层（如 `proxy.Router().AddRouteHandler(route, handler, opts...)`、`proxy.AddHookListener(cluster.Start, ...)`）。集群常量（Kind/State/Event/Hook/消息参数结构体）统一定义在 `cluster/cluster.go`。
 
 ### 集群节点间协作
 
@@ -81,3 +81,4 @@ container.Serve()                     // 启动
 - 业务错误统一走 `codes` 包的错误码，`ctx.Response` / 接口返回用 `codes.OK` 等。
 - 依赖注入风格：组件通过 `WithXxx` 选项函数（options.go）注入依赖（如 `gate.WithServer`、`gate.WithRegistry`），并遵循 `defaultOptions()` + 选项覆盖的模式。
 - 添加新子模块时，需同时更新 `tidy.sh` 中的模块清单。
+- `gate/`、`node/`、`client/` 是独立示例模块（各自 `go.mod` 的 module 名是 `due/gate` 等），通过 `replace ... => ../` 指向本地框架代码（与子模块做法一致），升级框架版本后需同步它们的 go.mod 并适配 API 变更。
