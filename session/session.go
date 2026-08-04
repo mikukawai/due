@@ -1,11 +1,14 @@
 package session
 
 import (
+	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/network"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -214,36 +217,48 @@ func (s *Session) Send(kind Kind, target int64, message []byte) error {
 }
 
 // Push 推送消息（异步）
-func (s *Session) Push(kind Kind, target int64, message []byte) error {
+func (s *Session) Push(kind Kind, target int64, disconnect bool, message []byte) error {
 	s.rw.RLock()
-	defer s.rw.RUnlock()
-
 	conn, err := s.conn(kind, target)
+	s.rw.RUnlock()
+
 	if err != nil {
 		return err
 	}
 
-	return conn.Push(message)
+	if err = conn.Push(message); err != nil {
+		return err
+	}
+
+	if disconnect {
+		return conn.Close()
+	} else {
+		return nil
+	}
 }
 
 // Multicast 推送组播消息（异步）
-func (s *Session) Multicast(kind Kind, targets []int64, message []byte) (n int64, err error) {
+func (s *Session) Multicast(kind Kind, targets []int64, disconnect bool, message []byte) (int64, error) {
 	if len(targets) == 0 {
-		return
+		return 0, nil
 	}
 
-	s.rw.RLock()
-	defer s.rw.RUnlock()
+	var (
+		total int64
+		conns map[int64]network.Conn
+		eg, _ = errgroup.WithContext(context.Background())
+	)
 
-	var conns map[int64]network.Conn
+	s.rw.RLock()
+
 	switch kind {
 	case Conn:
 		conns = s.conns
 	case User:
 		conns = s.users
 	default:
-		err = errors.ErrInvalidSessionKind
-		return
+		s.rw.RUnlock()
+		return 0, errors.ErrInvalidSessionKind
 	}
 
 	for _, target := range targets {
@@ -251,56 +266,118 @@ func (s *Session) Multicast(kind Kind, targets []int64, message []byte) (n int64
 		if !ok {
 			continue
 		}
-		if conn.Push(message) == nil {
-			n++
-		}
+
+		eg.Go(func() error {
+			if err := conn.Push(message); err != nil {
+				return err
+			}
+
+			atomic.AddInt64(&total, 1)
+
+			if disconnect {
+				_ = conn.Close()
+			}
+
+			return nil
+		})
 	}
 
-	return
+	s.rw.RUnlock()
+
+	if err := eg.Wait(); err != nil && total == 0 {
+		return 0, err
+	} else {
+		return total, nil
+	}
 }
 
 // Broadcast 推送广播消息（异步）
-func (s *Session) Broadcast(kind Kind, message []byte) (n int64, err error) {
-	s.rw.RLock()
-	defer s.rw.RUnlock()
+func (s *Session) Broadcast(kind Kind, disconnect bool, message []byte) (int64, error) {
+	var (
+		total int64
+		conns map[int64]network.Conn
+		eg, _ = errgroup.WithContext(context.Background())
+	)
 
-	var conns map[int64]network.Conn
+	s.rw.RLock()
+
 	switch kind {
 	case Conn:
 		conns = s.conns
 	case User:
 		conns = s.users
 	default:
-		err = errors.ErrInvalidSessionKind
-		return
+		s.rw.RUnlock()
+		return 0, errors.ErrInvalidSessionKind
 	}
 
-	for _, conn := range conns {
-		if conn.Push(message) == nil {
-			n++
-		}
+	for i := range conns {
+		conn := conns[i]
+
+		eg.Go(func() error {
+			if err := conn.Push(message); err != nil {
+				return err
+			}
+
+			atomic.AddInt64(&total, 1)
+
+			if disconnect {
+				_ = conn.Close()
+			}
+
+			return nil
+		})
 	}
 
-	return
+	s.rw.RUnlock()
+
+	if err := eg.Wait(); err != nil && total == 0 {
+		return 0, err
+	} else {
+		return total, nil
+	}
 }
 
 // Publish 发布频道消息（异步）
-func (s *Session) Publish(channel string, message []byte) (n int64) {
+func (s *Session) Publish(channel string, disconnect bool, message []byte) (int64, error) {
+	var (
+		total int64
+		eg, _ = errgroup.WithContext(context.Background())
+	)
+
 	s.rw.RLock()
-	defer s.rw.RUnlock()
 
 	channels, ok := s.channels[channel]
 	if !ok {
-		return
+		s.rw.RUnlock()
+		return 0, nil
 	}
 
-	for conn := range channels {
-		if conn.Push(message) == nil {
-			n++
-		}
+	for c := range channels {
+		conn := c
+
+		eg.Go(func() error {
+			if err := conn.Push(message); err != nil {
+				return err
+			}
+
+			atomic.AddInt64(&total, 1)
+
+			if disconnect {
+				_ = conn.Close()
+			}
+
+			return nil
+		})
 	}
 
-	return
+	s.rw.RUnlock()
+
+	if err := eg.Wait(); err != nil && total == 0 {
+		return 0, err
+	} else {
+		return total, nil
+	}
 }
 
 // Subscribe 订阅频道

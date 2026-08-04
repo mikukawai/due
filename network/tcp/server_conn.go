@@ -1,6 +1,7 @@
 package tcp
 
 import (
+	"context"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -23,7 +24,8 @@ type serverConn struct {
 	connMgr           *serverConnMgr // 连接管理
 	rw                sync.RWMutex   // 读写锁
 	conn              net.Conn       // TCP源连接
-	chWrite           chan chWrite   // 写入队列
+	taskPool          sync.Pool      // 任务对象池
+	taskQueue         chan *task     // 任务队列
 	done              chan struct{}  // 写入完成信号
 	close             chan struct{}  // 关闭信号
 	lastHeartbeatTime atomic.Int64   // 上次心跳时间
@@ -92,9 +94,7 @@ func (c *serverConn) Push(msg []byte) error {
 		return errors.ErrConnectionClosed
 	}
 
-	c.chWrite <- chWrite{typ: dataPacket, msg: msg}
-
-	return nil
+	return c.doWriteToQueue(c.taskQueue, dataPacket, msg)
 }
 
 // State 获取连接状态
@@ -212,7 +212,7 @@ func (c *serverConn) init(cm *serverConnMgr, id int64, conn net.Conn) {
 	c.state.Store(int32(network.ConnOpened))
 	c.conn = conn
 	c.connMgr = cm
-	c.chWrite = make(chan chWrite, 4096)
+	c.taskQueue = make(chan *task, c.connMgr.server.opts.writeQueueSize)
 	c.done = make(chan struct{})
 	c.close = make(chan struct{})
 	c.lastHeartbeatTime.Store(xtime.Now().UnixNano())
@@ -247,7 +247,7 @@ func (c *serverConn) graceClose(isNeedRecycle bool) error {
 		c.rw.RUnlock()
 		return errors.ErrConnectionClosed
 	}
-	c.chWrite <- chWrite{typ: closeSig}
+	c.taskQueue <- &task{typ: closeSig}
 	c.rw.RUnlock()
 
 	<-c.done
@@ -281,11 +281,12 @@ func (c *serverConn) doClose(isNeedRecycle bool) error {
 		return errors.ErrConnectionClosed
 	}
 
-	close(c.chWrite)
+	close(c.taskQueue)
 	close(c.close)
 	close(c.done)
 	conn := c.conn
 	c.conn = nil
+	c.taskQueue = nil
 	c.rw.Unlock()
 
 	err := conn.Close()
@@ -344,7 +345,7 @@ func (c *serverConn) read() {
 			if isHeartbeat {
 				// responsive heartbeat
 				if c.connMgr.server.opts.heartbeatMechanism == RespHeartbeat {
-					c.sendHeartbeat(conn)
+					c.doSendHeartbeat(conn)
 				}
 			} else {
 				if c.connMgr.server.receiveHandler != nil {
@@ -371,48 +372,68 @@ func (c *serverConn) write() {
 
 	for {
 		select {
-		case r, ok := <-c.chWrite:
+		case t, ok := <-c.taskQueue:
 			if !ok {
 				return
 			}
 
-			if r.typ == closeSig {
-				c.rw.RLock()
-				if c.conn != nil {
-					c.done <- struct{}{}
-				}
-				c.rw.RUnlock()
+			if !c.doWrite(conn, t) {
 				return
-			}
-
-			if c.isClosed() {
-				return
-			}
-
-			if _, err := conn.Write(r.msg); err != nil {
-				log.Errorf("write data message error: %v", err)
 			}
 		case t, ok := <-ticker.C:
 			if !ok {
 				return
 			}
 
-			deadline := t.Add(-2 * c.connMgr.server.opts.heartbeatInterval).UnixNano()
-
-			if c.lastHeartbeatTime.Load() < deadline {
-				log.Debugf("connection heartbeat timeout, cid: %d", c.id)
-				_ = c.forceClose(true)
+			if !c.doHandleHeartbeat(conn, t) {
 				return
-			} else {
-				if c.isClosed() {
-					return
-				}
-
-				if c.connMgr.server.opts.heartbeatMechanism == TickHeartbeat {
-					c.sendHeartbeat(conn)
-				}
 			}
 		}
+	}
+}
+
+// 执行写入操作
+func (c *serverConn) doWrite(conn net.Conn, t *task) bool {
+	defer c.doRecycleToPool(t)
+
+	if t.typ == closeSig {
+		c.rw.RLock()
+		if c.conn != nil {
+			c.done <- struct{}{}
+		}
+		c.rw.RUnlock()
+		return false
+	}
+
+	if c.isClosed() {
+		return false
+	}
+
+	if _, err := conn.Write(t.msg); err != nil {
+		log.Errorf("write message error: %v", err)
+	}
+
+	return true
+}
+
+// 处理心跳
+func (c *serverConn) doHandleHeartbeat(conn net.Conn, t time.Time) bool {
+	deadline := t.Add(-2 * c.connMgr.server.opts.heartbeatInterval).UnixNano()
+
+	if c.lastHeartbeatTime.Load() < deadline {
+		log.Debugf("connection heartbeat timeout, cid: %d", c.id)
+		_ = c.forceClose(true)
+		return false
+	} else {
+		if c.isClosed() {
+			return false
+		}
+
+		if c.connMgr.server.opts.heartbeatMechanism == TickHeartbeat {
+			c.doSendHeartbeat(conn)
+		}
+
+		return true
 	}
 }
 
@@ -422,7 +443,7 @@ func (c *serverConn) isClosed() bool {
 }
 
 // 发送心跳包
-func (c *serverConn) sendHeartbeat(conn net.Conn) {
+func (c *serverConn) doSendHeartbeat(conn net.Conn) {
 	if heartbeat, err := packet.PackHeartbeat(); err != nil {
 		log.Errorf("pack heartbeat message error: %v", err)
 	} else {
@@ -430,4 +451,36 @@ func (c *serverConn) sendHeartbeat(conn net.Conn) {
 			log.Errorf("write heartbeat message error: %v", err)
 		}
 	}
+}
+
+// 回收任务到对象池
+func (c *serverConn) doRecycleToPool(t *task) {
+	t.msg = nil
+	c.taskPool.Put(t)
+}
+
+// 写入任务到队列
+func (c *serverConn) doWriteToQueue(queue chan *task, typ int8, msg ...[]byte) error {
+	t := c.taskPool.Get().(*task)
+	t.typ = typ
+	if len(msg) > 0 {
+		t.msg = msg[0]
+	}
+
+	if c.connMgr.server.opts.writeTimeout > 0 && len(queue) == cap(queue) {
+		ctx, cancel := context.WithTimeout(context.Background(), c.connMgr.server.opts.writeTimeout)
+		defer cancel()
+
+		select {
+		case <-ctx.Done():
+			c.doRecycleToPool(t)
+			return ctx.Err()
+		case queue <- t:
+			return nil
+		}
+	}
+
+	queue <- t
+
+	return nil
 }

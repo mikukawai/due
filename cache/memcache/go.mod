@@ -4,8 +4,8 @@ go 1.25.0
 
 require (
 	github.com/bradfitz/gomemcache v0.0.0-20250403215159-8d39553ac7cf
-	github.com/dobyte/due/v2 v2.5.1
-	golang.org/x/sync v0.19.0
+	github.com/dobyte/due/v2 v2.5.8
+	golang.org/x/sync v0.20.0
 )
 
 require (

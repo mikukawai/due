@@ -31,9 +31,19 @@ func NewNodeLinker(ctx context.Context, opts *Options) *NodeLinker {
 	return &NodeLinker{
 		ctx:        ctx,
 		opts:       opts,
-		builder:    node.NewBuilder(&node.Options{InsID: opts.InsID, InsKind: opts.InsKind}),
-		dispatcher: dispatcher.NewDispatcher(opts.Dispatch),
 		sources:    make(map[int64]map[string]string),
+		dispatcher: dispatcher.NewDispatcher(opts.Dispatch),
+		builder: node.NewBuilder(&node.ClientOptions{
+			ID:                opts.ID,
+			Kind:              opts.Kind,
+			ConnNum:           opts.ConnNum,
+			CallTimeout:       opts.CallTimeout,
+			DialTimeout:       opts.DialTimeout,
+			DialRetryTimes:    opts.DialRetryTimes,
+			WriteTimeout:      opts.WriteTimeout,
+			WriteQueueSize:    opts.WriteQueueSize,
+			FaultRecoveryTime: opts.FaultRecoveryTime,
+		}),
 	}
 }
 
@@ -226,13 +236,17 @@ func (l *NodeLinker) Trigger(ctx context.Context, args *TriggerArgs) error {
 				return err
 			}
 
-			return client.Trigger(ctx, args.Event, args.CID, args.UID)
+			if err = client.Trigger(ctx, args.Event, args.CID, args.UID); err != nil {
+				return err
+			}
+
+			return nil
 		})
 
 		return true
 	})
 
-	return eg.Wait()
+	return nil
 }
 
 // GetState 获取节点状态
@@ -276,7 +290,7 @@ func (l *NodeLinker) doRPC(ctx context.Context, routeID int32, uid int64, fn fun
 		return nil, errors.ErrIllegalRequest
 	}
 
-	if l.opts.InsKind == cluster.Gate && route.Internal() {
+	if l.opts.Kind == cluster.Gate && route.Internal() {
 		return nil, errors.ErrIllegalRequest
 	}
 
@@ -377,21 +391,24 @@ func (l *NodeLinker) doStoreSource(uid int64, name, nid string) {
 				} else {
 					sources[name] = nid
 
-					if l.opts.InsID == nid {
+					switch l.opts.ID {
+					case oldNID:
 						return false, true
-					} else {
+					case nid:
 						return true, false
+					default:
+						return false, false
 					}
 				}
 			} else {
 				sources[name] = nid
 
-				return l.opts.InsID == nid, false
+				return l.opts.ID == nid, false
 			}
 		} else {
 			l.sources[uid] = map[string]string{name: nid}
 
-			return l.opts.InsID == nid, false
+			return l.opts.ID == nid, false
 		}
 	}()
 
@@ -431,7 +448,7 @@ func (l *NodeLinker) doDeleteSource(uid int64, name, nid string) {
 			delete(sources, name)
 		}
 
-		return oldNID == l.opts.InsID
+		return oldNID == l.opts.ID
 	}()
 
 	if done && l.opts.DoneHandler != nil {
@@ -473,22 +490,24 @@ func (l *NodeLinker) WatchUserLocate() {
 			case <-l.ctx.Done():
 				return
 			default:
-				// exec watch
-			}
+				events, err := watcher.Next()
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					} else {
+						continue
+					}
+				}
 
-			events, err := watcher.Next()
-			if err != nil {
-				continue
-			}
-
-			for _, event := range events {
-				switch event.Type {
-				case locate.BindNode:
-					l.doStoreSource(event.UID, event.InsName, event.InsID)
-				case locate.UnbindNode:
-					l.doDeleteSource(event.UID, event.InsName, event.InsID)
-				default:
-					// ignore
+				for _, event := range events {
+					switch event.Type {
+					case locate.BindNode:
+						l.doStoreSource(event.UID, event.InsName, event.InsID)
+					case locate.UnbindNode:
+						l.doDeleteSource(event.UID, event.InsName, event.InsID)
+					default:
+						// ignore
+					}
 				}
 			}
 		}
@@ -511,15 +530,17 @@ func (l *NodeLinker) WatchClusterInstance() {
 			case <-l.ctx.Done():
 				return
 			default:
-				// exec watch
-			}
+				services, err := watcher.Next()
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					} else {
+						continue
+					}
+				}
 
-			services, err := watcher.Next()
-			if err != nil {
-				continue
+				l.dispatcher.ReplaceServices(services...)
 			}
-
-			l.dispatcher.ReplaceServices(services...)
 		}
 	}()
 }

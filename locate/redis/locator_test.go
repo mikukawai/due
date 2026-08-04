@@ -3,11 +3,12 @@ package redis_test
 import (
 	"context"
 	"fmt"
+	"testing"
+	"time"
+
 	"github.com/dobyte/due/locate/redis/v2"
 	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/utils/xuuid"
-	"testing"
-	"time"
 )
 
 var locator = redis.NewLocator(

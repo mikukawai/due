@@ -32,7 +32,9 @@ func NewServer(opts ...Option) *Server {
 	s := &Server{}
 	s.opts = o
 	s.proxy = newProxy(s)
-	s.app = fiber.New(fiber.Config{
+	s.app = fiber.NewWithCustomCtx(func(app *fiber.App) fiber.CustomCtx {
+		return newContext(fiber.NewDefaultCtx(app), s.proxy)
+	}, fiber.Config{
 		ServerHeader:                 o.name,
 		StrictRouting:                o.strictRouting,
 		CaseSensitive:                o.caseSensitive,
@@ -70,9 +72,7 @@ func NewServer(opts ...Option) *Server {
 		s.app.Use(logger.New())
 	}
 
-	s.app.Use(recover.New(recover.Config{
-		EnableStackTrace: true,
-	}))
+	s.app.Use(recover.New(recover.Config{EnableStackTrace: true}))
 
 	if s.opts.corsOpts.Enable {
 		s.app.Use(cors.New(cors.Config{
@@ -105,7 +105,7 @@ func NewServer(opts ...Option) *Server {
 		switch handler := o.middlewares[i].(type) {
 		case Handler:
 			s.app.Use(func(ctx fiber.Ctx) error {
-				return handler(&context{Ctx: ctx, proxy: s.proxy})
+				return handler(ctx.(Context))
 			})
 		case fiber.Handler:
 			s.app.Use(handler)

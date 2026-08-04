@@ -6,15 +6,25 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/registry"
+)
+
+type state int32
+
+const (
+	stateInitial state = 0
+	stateRunning state = 1
+	stateStopped state = 2
 )
 
 type watcher struct {
 	idx        int64
-	state      atomic.Bool
 	ctx        context.Context
 	cancel     context.CancelFunc
 	watcherMgr *watcherMgr
+	rw         sync.RWMutex
+	state      state
 	chWatch    chan []*registry.ServiceInstance
 }
 
@@ -29,16 +39,23 @@ func newWatcher(wm *watcherMgr, idx int64) *watcher {
 }
 
 func (w *watcher) notify(services []*registry.ServiceInstance) {
-	if w.state.Load() {
+	w.rw.RLock()
+	defer w.rw.RUnlock()
+
+	if w.state == stateRunning {
 		w.chWatch <- services
 	}
 }
 
 // Next 返回服务实例列表
 func (w *watcher) Next() ([]*registry.ServiceInstance, error) {
-	if w.state.CompareAndSwap(false, true) {
+	w.rw.Lock()
+	if w.state == stateInitial {
+		w.state = stateRunning
+		w.rw.Unlock()
 		return w.watcherMgr.services(), nil
 	}
+	w.rw.Unlock()
 
 	select {
 	case <-w.ctx.Done():
@@ -56,6 +73,14 @@ func (w *watcher) Next() ([]*registry.ServiceInstance, error) {
 
 // Stop 停止监听
 func (w *watcher) Stop() error {
+	w.rw.Lock()
+	defer w.rw.Unlock()
+
+	if w.state == stateStopped {
+		return errors.ErrIllegalOperation
+	}
+
+	w.state = stateStopped
 	w.cancel()
 	close(w.chWatch)
 	return w.watcherMgr.recycle(w.idx)

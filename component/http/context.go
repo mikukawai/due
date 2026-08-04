@@ -1,15 +1,16 @@
 package http
 
 import (
-	"bytes"
-	"io"
 	"net/http"
-	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/dobyte/due/v2/codes"
+	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/mode"
 	"github.com/gofiber/fiber/v3"
+	"github.com/valyala/fasthttp"
+	"github.com/valyala/fasthttp/fasthttpadaptor"
 )
 
 type Resp struct {
@@ -34,13 +35,22 @@ type Context interface {
 }
 
 type context struct {
-	fiber.Ctx
-	proxy *Proxy
+	*fiber.DefaultCtx
+	proxy          *Proxy
+	stdRequest     *http.Request
+	stdRequestOnce *sync.Once
+}
+
+func newContext(ctx *fiber.DefaultCtx, proxy *Proxy) *context {
+	return &context{
+		DefaultCtx: ctx,
+		proxy:      proxy,
+	}
 }
 
 // CTX 获取fiber.Ctx
 func (c *context) CTX() fiber.Ctx {
-	return c.Ctx
+	return c
 }
 
 // Proxy 代理API
@@ -85,24 +95,23 @@ func (c *context) Success(data ...any) error {
 	}
 }
 
+// Reset 重置上下文
+func (c *context) Reset(fctx *fasthttp.RequestCtx) {
+	c.DefaultCtx.Reset(fctx)
+	c.stdRequestOnce = &sync.Once{}
+}
+
 // StdRequest 获取标准请求（net/http）
 func (c *context) StdRequest() *http.Request {
-	req := c.Request()
+	c.stdRequestOnce.Do(func() {
+		if c.stdRequest == nil {
+			c.stdRequest = &http.Request{}
+		}
 
-	std := &http.Request{}
-	std.Method = c.Method()
-	std.URL, _ = url.Parse(req.URI().String())
-	std.Proto = c.Protocol()
-	std.ProtoMajor, std.ProtoMinor, _ = http.ParseHTTPVersion(std.Proto)
-	std.Header = c.GetReqHeaders()
-	std.Host = c.Host()
-	std.ContentLength = int64(len(c.Body()))
-	std.RemoteAddr = c.RequestCtx().RemoteAddr().String()
-	std.RequestURI = string(req.RequestURI())
+		if err := fasthttpadaptor.ConvertRequest(c.RequestCtx(), c.stdRequest, true); err != nil {
+			log.Error("ConvertRequest failed: %v", err)
+		}
+	})
 
-	if req.Body() != nil {
-		std.Body = io.NopCloser(bytes.NewReader(req.Body()))
-	}
-
-	return std
+	return c.stdRequest
 }

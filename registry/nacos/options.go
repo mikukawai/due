@@ -2,9 +2,10 @@ package nacos
 
 import (
 	"context"
+	"time"
+
 	"github.com/dobyte/due/v2/etc"
 	"github.com/nacos-group/nacos-sdk-go/v2/clients/naming_client"
-	"time"
 )
 
 const (

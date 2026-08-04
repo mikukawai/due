@@ -10,6 +10,9 @@ package nacos_test
 import (
 	"context"
 	"fmt"
+	"testing"
+	"time"
+
 	"github.com/dobyte/due/registry/nacos/v2"
 	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/core/net"
@@ -17,8 +20,6 @@ import (
 	"github.com/dobyte/due/v2/registry"
 	"github.com/dobyte/due/v2/utils/xconv"
 	"golang.org/x/sync/errgroup"
-	"testing"
-	"time"
 )
 
 const (
@@ -27,12 +28,12 @@ const (
 )
 
 var reg = nacos.NewRegistry(
-//nacos.WithUrls("http://192.168.2.54:8850/nacos"),
-//nacos.WithNamespaceId("nacos-test"),
+// nacos.WithUrls("http://192.168.2.54:8850/nacos"),
+// nacos.WithNamespaceId("nacos-test"),
 )
 
 func TestRegistry_Register1(t *testing.T) {
-	host, err := net.ExternalIP()
+	host, err := net.PublicIP()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +69,7 @@ func TestRegistry_Register1(t *testing.T) {
 }
 
 func TestRegistry_Register2(t *testing.T) {
-	host, err := net.ExternalIP()
+	host, err := net.PublicIP()
 	if err != nil {
 		t.Fatal(err)
 	}
