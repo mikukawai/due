@@ -1,0 +1,39 @@
+# MCP 客户端配置
+# 说明：为规避 MCP stdio 协议对 stdout 的独占要求，框架日志在 main.go 中被强制重定向到 stderr，
+#       因此本文件的 [log] 段仅作参考，实际生效的日志输出以 main.go 中的 initLog() 为准。
+
+# 集群客户端配置
+[cluster.client]
+    # 实例名称
+    name = "mcp-client"
+    # 编解码器。可选：json | proto
+    codec = "json"
+
+[network.ws.client]
+    # 拨号地址
+    url = "ws://127.0.0.1:3553"
+    # 握手超时时间
+    handshakeTimeout = "10s"
+    # 心跳间隔时间
+    heartbeatInterval = "10s"
+
+# 消息打包配置（必须与 gate/node 保持一致：routeBytes=4、seqBytes=0）
+[packet]
+    # 字节序
+    byteOrder = "big"
+    # 路由字节数
+    routeBytes = 4
+    # 序列号字节数，为 0 表示不启用
+    seqBytes = 0
+    # 消息字节数
+    bufferBytes = 100000
+
+[log]
+    # 日志输出级别
+    level = "debug"
+    # 日志输出格式
+    format = "text"
+    # 是否输出到终端（被 main.go 的 initLog 覆盖，实际写入 stderr）
+    stdout = false
+    # 日志输出文件
+    file = "./log/mcp-client.log"

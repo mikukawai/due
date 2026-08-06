@@ -27,6 +27,7 @@ readonly modules=(
     "./registry/nacos"
     "./transport/rpcx"
     "./transport/grpc"
+    "./mcp-client"
 )
 
 for module in ${modules[@]}

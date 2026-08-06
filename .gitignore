@@ -30,9 +30,13 @@ go.work.sum
 # project run dir
 *run/
 
+# WorkBuddy local memory
+.workbuddy/
+
 # executable files
 *.exe
 # Example module binaries
 gate/gate
 node/node
+node/token
 client/client

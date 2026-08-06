@@ -19,6 +19,21 @@ shutdownMaxWaitTime = "0s"
     # RPC调用超时时间，支持单位：纳秒（ns）、微秒（us | µs）、毫秒（ms）、秒（s）、分（m）、小时（h）、天（d）。默认为3s
     timeout = "3s"
 
+[auth]
+    # JWT 签名密钥，生产环境务必更换为强随机字符串
+    secret = "due-game-server-secret-change-me"
+    # 访问令牌有效期，默认为2h
+    accessTokenTTL = "2h"
+    # 刷新令牌有效期，默认为168h（7天）
+    refreshTokenTTL = "168h"
+
+[match]
+    # DUE → DS 控制连接地址（DS 服务器实际所在 IP + 控制端口，node 内部使用）
+    ds_address = "100.114.203.26:7001"
+    # 返回给客户端的 DS 主机地址（DS 服务器所在机器的 IP，不含端口），
+    # 客户端按 ds_host:battle_port(7000) 连接战斗服
+    ds_external_host = "100.114.203.26"
+
 [locate.redis]
     # 客户端连接地址
     addrs = ["127.0.0.1:6379"]
