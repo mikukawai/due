@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	defaultAddr       = "127.0.0.1:6379"
-	defaultDB         = 0
-	defaultMaxRetries = 3
-	defaultPrefix     = "due:locate"
+	defaultAddr       = "127.0.0.1:6379" // Default connection address
+	defaultDB         = 0                // Default database number
+	defaultMaxRetries = 3                // Default maximum number of retries
+	defaultRetryTimes = 3                // Default reconnect retry count
+	defaultPrefix     = "due:locate"     // Default key prefix
 )
 
 const (
@@ -26,49 +27,54 @@ const (
 	defaultPrefixKey     = "etc.locate.redis.prefix"
 )
 
+// Option configures the locator options.
 type Option func(o *options)
 
+// options holds the locator options.
 type options struct {
-	ctx context.Context
+	ctx context.Context // Context
 
-	// 客户端连接地址
-	// 内建客户端配置，默认为[]string{"127.0.0.1:6379"}
+	// Connection addresses of the client.
+	// Built-in client configuration, defaults to []string{"127.0.0.1:6379"}.
 	addrs []string
 
-	// 数据库号
-	// 内建客户端配置，默认为0
+	// Database number.
+	// Built-in client configuration, defaults to 0.
 	db int
 
-	// 用户名
-	// 内建客户端配置，默认为空
+	// Username.
+	// Built-in client configuration, defaults to empty.
 	username string
 
-	// 密码
-	// 内建客户端配置，默认为空
+	// Password.
+	// Built-in client configuration, defaults to empty.
 	password string
 
-	// 客户端证书
+	// Client certificate.
 	certFile string
 
-	// 客户端密钥
+	// Client key.
 	keyFile string
 
-	// CA证书
+	// CA certificate.
 	caFile string
 
-	// 最大重试次数
-	// 内建客户端配置，默认为3次
+	// Maximum number of retries.
+	// Built-in client configuration, defaults to 3.
 	maxRetries int
 
-	// 客户端
-	// 外部客户端配置，存在外部客户端时，优先使用外部客户端，默认为nil
+	// Client.
+	// External client configuration; when an external client exists it takes precedence, defaults to nil.
 	client redis.UniversalClient
 
-	// 前缀
-	// key前缀，默认为due:locate
+	// Prefix.
+	// Key prefix, defaults to due:locate.
 	prefix string
 }
 
+// defaultOptions creates the default locator options.
+//
+// It reads every parameter from the configuration environment and fills in defaults.
 func defaultOptions() *options {
 	return &options{
 		ctx:        context.Background(),
@@ -84,47 +90,47 @@ func defaultOptions() *options {
 	}
 }
 
-// WithContext 设置上下文
+// WithContext sets the context.
 func WithContext(ctx context.Context) Option {
 	return func(o *options) { o.ctx = ctx }
 }
 
-// WithAddrs 设置连接地址
+// WithAddrs sets the connection addresses.
 func WithAddrs(addrs ...string) Option {
 	return func(o *options) { o.addrs = addrs }
 }
 
-// WithDB 设置数据库号
+// WithDB sets the database number.
 func WithDB(db int) Option {
 	return func(o *options) { o.db = db }
 }
 
-// WithUsername 设置用户名
+// WithUsername sets the username.
 func WithUsername(username string) Option {
 	return func(o *options) { o.username = username }
 }
 
-// WithPassword 设置密码
+// WithPassword sets the password.
 func WithPassword(password string) Option {
 	return func(o *options) { o.password = password }
 }
 
-// WithCredentials 设置证书、密钥、CA证书
+// WithCredentials sets the certificate, key and CA certificate.
 func WithCredentials(certFile, keyFile, caFile string) Option {
 	return func(o *options) { o.certFile, o.keyFile, o.caFile = certFile, keyFile, caFile }
 }
 
-// WithMaxRetries 设置最大重试次数
+// WithMaxRetries sets the maximum number of retries.
 func WithMaxRetries(maxRetries int) Option {
 	return func(o *options) { o.maxRetries = maxRetries }
 }
 
-// WithClient 设置外部客户端
+// WithClient sets the external client.
 func WithClient(client redis.UniversalClient) Option {
 	return func(o *options) { o.client = client }
 }
 
-// WithPrefix 设置前缀
+// WithPrefix sets the prefix.
 func WithPrefix(prefix string) Option {
 	return func(o *options) { o.prefix = prefix }
 }

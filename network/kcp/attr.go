@@ -6,23 +6,30 @@ type attr struct {
 	values sync.Map
 }
 
-// Get 获取属性值
+// Get returns the attribute value stored under key. The value is nil when key is not found.
+//
+// The second result reports whether key exists.
 func (a *attr) Get(key any) (any, bool) {
 	return a.values.Load(key)
 }
 
-// Set 设置属性值
+// Set stores value under key, overwriting any existing value.
 func (a *attr) Set(key, value any) {
 	a.values.Store(key, value)
 }
 
-// Del 删除属性值
+// Del removes the attribute stored under key and reports whether it existed before deletion.
 func (a *attr) Del(key any) (ok bool) {
 	_, ok = a.values.LoadAndDelete(key)
 	return
 }
 
-// Visit 访问所有的属性值
+// Clear removes every attribute.
+func (a *attr) Clear() {
+	a.values.Clear()
+}
+
+// Visit calls fn for every attribute in turn and stops early when fn returns false.
 func (a *attr) Visit(fn func(key, value any) bool) {
 	a.values.Range(fn)
 }

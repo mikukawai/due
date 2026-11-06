@@ -2,180 +2,392 @@ package consul
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dobyte/due/v2/errors"
+	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/registry"
+	"github.com/dobyte/due/v2/utils/xcall"
 )
 
-type state int32
-
+// Watcher states.
 const (
-	stateInitial state = 0
-	stateRunning state = 1
-	stateStopped state = 2
+	stateInitial int32 = iota // Initial state
+	stateRunning              // Running
+	stateStopped              // Stopped
 )
 
+// watcher is a service instance watcher that obtains service instance updates through
+// [watcher.Next].
 type watcher struct {
-	idx        int64
-	ctx        context.Context
-	cancel     context.CancelFunc
-	watcherMgr *watcherMgr
-	rw         sync.RWMutex
-	state      state
-	chWatch    chan []*registry.ServiceInstance
+	idx     int64                            // Watcher sequence number
+	wm      *watcherMgr                      // Owning watcher manager
+	state   atomic.Int32                     // Watcher state
+	mu      sync.Mutex                       // Protects the closing and sending of chWatch
+	chWatch chan []*registry.ServiceInstance // Service instance update channel
 }
 
+// newWatcher creates a service instance watcher.
 func newWatcher(wm *watcherMgr, idx int64) *watcher {
 	w := &watcher{}
-	w.ctx, w.cancel = context.WithCancel(wm.ctx)
+	w.wm = wm
 	w.idx = idx
-	w.watcherMgr = wm
-	w.chWatch = make(chan []*registry.ServiceInstance, 16)
+	w.chWatch = make(chan []*registry.ServiceInstance, 1)
 
 	return w
 }
 
+// notify notifies the watcher of service instance updates.
 func (w *watcher) notify(services []*registry.ServiceInstance) {
-	w.rw.RLock()
-	defer w.rw.RUnlock()
+	if w.state.Load() != stateRunning {
+		return
+	}
 
-	if w.state == stateRunning {
-		w.chWatch <- services
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.state.Load() != stateRunning {
+		return
+	}
+
+	w.flush()
+	w.chWatch <- services
+}
+
+// flush empties the watch queue.
+func (w *watcher) flush() {
+	for {
+		select {
+		case <-w.chWatch:
+		default:
+			return
+		}
 	}
 }
 
-// Next 返回服务实例列表
-func (w *watcher) Next() ([]*registry.ServiceInstance, error) {
-	w.rw.Lock()
-	if w.state == stateInitial {
-		w.state = stateRunning
-		w.rw.Unlock()
-		return w.watcherMgr.services(), nil
-	}
-	w.rw.Unlock()
+// latest returns the latest service instances.
+func (w *watcher) latest() ([]*registry.ServiceInstance, error) {
+	var (
+		exist     bool
+		instances []*registry.ServiceInstance
+	)
 
-	select {
-	case <-w.ctx.Done():
-		return nil, w.ctx.Err()
-	case services, ok := <-w.chWatch:
-		if !ok {
-			if err := w.ctx.Err(); err != nil {
-				return nil, err
+	for {
+		select {
+		case services, ok := <-w.chWatch:
+			if !ok {
+				if exist {
+					return instances, nil
+				}
+
+				return nil, errors.ErrWatcherStopped
+			}
+
+			exist, instances = true, services
+		default:
+			if exist {
+				return instances, nil
+			} else {
+				return w.wm.services()
 			}
 		}
-
-		return services, nil
 	}
 }
 
-// Stop 停止监听
-func (w *watcher) Stop() error {
-	w.rw.Lock()
-	defer w.rw.Unlock()
+// Next returns the list of service instances.
+func (w *watcher) Next() ([]*registry.ServiceInstance, error) {
+	if w.state.CompareAndSwap(stateInitial, stateRunning) {
+		return w.latest()
+	}
 
-	if w.state == stateStopped {
+	services, ok := <-w.chWatch
+	if !ok {
+		return nil, errors.ErrWatcherStopped
+	}
+
+	return services, nil
+}
+
+// Stop stops watching.
+func (w *watcher) Stop() error {
+	if w.state.Swap(stateStopped) == stateStopped {
 		return errors.ErrIllegalOperation
 	}
 
-	w.state = stateStopped
-	w.cancel()
+	w.mu.Lock()
 	close(w.chWatch)
-	return w.watcherMgr.recycle(w.idx)
-}
+	w.mu.Unlock()
 
-type watcherMgr struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	registry         *Registry
-	serviceName      string
-	serviceInstances *atomic.Value
-	serviceWaitIndex uint64
-	idx              atomic.Int64
-	rw               sync.RWMutex
-	watchers         map[int64]*watcher
-}
-
-func newWatcherMgr(registry *Registry, ctx context.Context, serviceName string) (*watcherMgr, error) {
-	services, index, err := registry.services(ctx, serviceName, 0, true)
-	if err != nil {
-		return nil, err
-	}
-
-	wm := &watcherMgr{}
-	wm.ctx, wm.cancel = context.WithCancel(registry.ctx)
-	wm.registry = registry
-	wm.serviceName = serviceName
-	wm.serviceInstances = &atomic.Value{}
-	wm.serviceWaitIndex = index
-	wm.serviceInstances.Store(services)
-	wm.watchers = make(map[int64]*watcher)
-
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-wm.ctx.Done():
-				return
-			case <-ticker.C:
-				tctx, tcancel := context.WithTimeout(ctx, 120*time.Second)
-				services, index, err = wm.registry.services(tctx, wm.serviceName, wm.serviceWaitIndex, true)
-				tcancel()
-				if err != nil {
-					time.Sleep(time.Second)
-					continue
-				}
-
-				if index != wm.serviceWaitIndex {
-					wm.serviceWaitIndex = index
-					wm.serviceInstances.Store(services)
-					wm.broadcast()
-				}
-			}
-		}
-	}()
-
-	return wm, nil
-}
-
-func (wm *watcherMgr) fork() registry.Watcher {
-	wm.rw.Lock()
-	defer wm.rw.Unlock()
-
-	w := newWatcher(wm, wm.idx.Add(1))
-	wm.watchers[w.idx] = w
-
-	return w
-}
-
-func (wm *watcherMgr) recycle(idx int64) error {
-	wm.rw.Lock()
-	defer wm.rw.Unlock()
-
-	delete(wm.watchers, idx)
-
-	if len(wm.watchers) == 0 {
-		wm.cancel()
-		wm.registry.watchers.Delete(wm.serviceName)
-	}
+	w.wm.recycle(w.idx)
 
 	return nil
 }
 
+// watcherMgr is a service instance watcher manager that manages all watchers under the same service
+// name and keeps a snapshot of the service instances.
+type watcherMgr struct {
+	registry         *Registry                   // Owning registry and discovery component
+	ctx              context.Context             // Watch goroutine context
+	cancel           context.CancelFunc          // Watch goroutine cancel function
+	serviceName      string                      // Service name
+	idx              atomic.Int64                // Watcher sequence number generator
+	rw               sync.RWMutex                // Protects the watchers, serviceInstances and other fields
+	watchers         map[int64]*watcher          // Watcher registry
+	wg               sync.WaitGroup              // Waits for the watch goroutine to exit
+	stopped          atomic.Bool                 // Whether the manager has stopped
+	healthy          atomic.Bool                 // Whether the watch connection is healthy
+	serviceInstances []*registry.ServiceInstance // Service instance snapshot
+	serviceWaitIndex uint64                      // Service instance query index
+}
+
+// newWatcherMgr creates a service instance watcher manager.
+func newWatcherMgr(r *Registry, serviceName string, services []*registry.ServiceInstance, waitIndex uint64) *watcherMgr {
+	wm := &watcherMgr{}
+	wm.registry = r
+	wm.ctx, wm.cancel = context.WithCancel(context.Background())
+	wm.serviceName = serviceName
+	wm.watchers = make(map[int64]*watcher)
+	wm.serviceInstances = services
+	wm.serviceWaitIndex = waitIndex
+	wm.healthy.Store(true)
+
+	return wm
+}
+
+// init initializes the service instance watcher.
+func (wm *watcherMgr) init() {
+	wm.wg.Go(func() {
+		for {
+			wm.watchLoop()
+
+			if wm.stopped.Load() {
+				return
+			}
+
+			if !wm.resyncWithRetry() {
+				wm.rw.Lock()
+				watchers := wm.loadWatchers()
+
+				if wm.stopped.CompareAndSwap(false, true) {
+					wm.removeFromRegistry()
+					wm.rw.Unlock()
+
+					for _, w := range watchers {
+						w.Stop()
+					}
+
+					wm.cancel()
+
+					return
+				}
+
+				wm.rw.Unlock()
+
+				return
+			}
+		}
+	})
+}
+
+// fork creates a new service instance watcher.
+func (wm *watcherMgr) fork() (registry.Watcher, error) {
+	wm.rw.Lock()
+	defer wm.rw.Unlock()
+
+	if wm.stopped.Load() {
+		return nil, errors.ErrWatcherStopped
+	}
+
+	w := newWatcher(wm, wm.idx.Add(1))
+	wm.watchers[w.idx] = w
+
+	return w, nil
+}
+
+// recycle reclaims a service instance watcher.
+func (wm *watcherMgr) recycle(idx int64) {
+	wm.rw.Lock()
+	delete(wm.watchers, idx)
+	if len(wm.watchers) != 0 {
+		wm.rw.Unlock()
+		return
+	}
+
+	if !wm.stopped.CompareAndSwap(false, true) {
+		wm.rw.Unlock()
+		return
+	}
+
+	wm.removeFromRegistry()
+	wm.rw.Unlock()
+
+	wm.cancel()
+	wm.wg.Wait()
+}
+
+// removeFromRegistry removes this manager from the registry.
+//
+// It removes the manager only when the registry still points to it, so that a concurrently rebuilt
+// manager is not mistakenly deleted by the cleanup logic of an old manager.
+func (wm *watcherMgr) removeFromRegistry() {
+	reg := wm.registry
+
+	reg.mu1.Lock()
+	defer reg.mu1.Unlock()
+
+	if v, ok := reg.watchers.Load(wm.serviceName); ok && v == wm {
+		reg.watchers.Delete(wm.serviceName)
+	}
+}
+
+// stop stops watching service instance updates.
+func (wm *watcherMgr) stop() {
+	wm.rw.Lock()
+	if !wm.stopped.CompareAndSwap(false, true) {
+		wm.rw.Unlock()
+		return
+	}
+
+	wm.removeFromRegistry()
+	watchers := wm.loadWatchers()
+	wm.rw.Unlock()
+
+	for _, w := range watchers {
+		w.Stop()
+	}
+
+	wm.cancel()
+	wm.wg.Wait()
+}
+
+// watchLoop watches for service instance updates.
+func (wm *watcherMgr) watchLoop() {
+	for {
+		select {
+		case <-wm.ctx.Done():
+			return
+		default:
+		}
+
+		services, index, err := wm.registry.services(wm.ctx, wm.serviceName, wm.serviceWaitIndex, true, true)
+
+		if err != nil {
+			if wm.ctx.Err() != nil {
+				return
+			}
+			wm.healthy.Store(false)
+			log.Warnf("consul watch error: %v", err)
+			return
+		}
+
+		wm.healthy.Store(true)
+
+		wm.rw.Lock()
+		if index != wm.serviceWaitIndex {
+			wm.serviceWaitIndex = index
+			wm.serviceInstances = services
+			wm.rw.Unlock()
+
+			wm.broadcast()
+		} else {
+			wm.rw.Unlock()
+		}
+	}
+}
+
+// resyncWithRetry retries synchronizing the service instances.
+func (wm *watcherMgr) resyncWithRetry() bool {
+	err := xcall.Backoff(wm.ctx, func(ctx context.Context, attempt int) (bool, error) {
+		if wm.stopped.Load() {
+			return false, errors.ErrWatcherStopped
+		}
+
+		ctx, cancel := context.WithTimeout(ctx, wm.registry.opts.timeout)
+		services, index, err := wm.registry.services(ctx, wm.serviceName, 0, true, false)
+		cancel()
+		if err != nil {
+			log.Warnf("consul watch resync failed, retry %d times, err: %v", attempt, err)
+			return true, err
+		}
+
+		wm.rw.Lock()
+		wm.serviceInstances = services
+		wm.serviceWaitIndex = index
+		wm.rw.Unlock()
+
+		wm.healthy.Store(true)
+		wm.broadcast()
+
+		return false, nil
+	}, max(1, wm.registry.opts.retryTimes), 100*time.Millisecond, 3*time.Second)
+
+	return err == nil
+}
+
+// broadcast notifies the watchers of service instance updates.
 func (wm *watcherMgr) broadcast() {
 	wm.rw.RLock()
-	defer wm.rw.RUnlock()
+	services := wm.loadServices()
+	watchers := wm.loadWatchers()
+	wm.rw.RUnlock()
 
-	services := wm.services()
-	for _, w := range wm.watchers {
+	for _, w := range watchers {
 		w.notify(services)
 	}
 }
 
-func (wm *watcherMgr) services() []*registry.ServiceInstance {
-	return wm.serviceInstances.Load().([]*registry.ServiceInstance)
+// loadWatchers loads all watchers.
+func (wm *watcherMgr) loadWatchers() []*watcher {
+	watchers := make([]*watcher, 0, len(wm.watchers))
+
+	for _, w := range wm.watchers {
+		watchers = append(watchers, w)
+	}
+
+	return watchers
+}
+
+// loadServices loads all service instances.
+func (wm *watcherMgr) loadServices() []*registry.ServiceInstance {
+	services := make([]*registry.ServiceInstance, 0, len(wm.serviceInstances))
+
+	for _, ins := range wm.serviceInstances {
+		service := &registry.ServiceInstance{
+			ID:       ins.ID,
+			Name:     ins.Name,
+			Kind:     ins.Kind,
+			Alias:    ins.Alias,
+			State:    ins.State,
+			Events:   make([]int, len(ins.Events)),
+			Routes:   make([]registry.Route, len(ins.Routes)),
+			Services: make([]string, len(ins.Services)),
+			Endpoint: ins.Endpoint,
+			Weight:   ins.Weight,
+			Metadata: make(map[string]string, len(ins.Metadata)),
+		}
+
+		copy(service.Events, ins.Events)
+		copy(service.Routes, ins.Routes)
+		copy(service.Services, ins.Services)
+		maps.Copy(service.Metadata, ins.Metadata)
+
+		services = append(services, service)
+	}
+
+	return services
+}
+
+// services returns all service instances.
+func (wm *watcherMgr) services() ([]*registry.ServiceInstance, error) {
+	wm.rw.RLock()
+	defer wm.rw.RUnlock()
+
+	if wm.stopped.Load() {
+		return nil, errors.ErrWatcherStopped
+	}
+
+	return wm.loadServices(), nil
 }

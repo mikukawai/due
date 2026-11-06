@@ -1,37 +1,54 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/5/11 10:01 上午
- * @Desc: TODO
- */
-
 package network
 
+import "github.com/dobyte/due/v2/core/buffer"
+
 type (
-	StartHandler      func()
-	CloseHandler      func()
-	ConnectHandler    func(conn Conn)
+	// StartHandler is the handler invoked when the server starts.
+	StartHandler func()
+	// CloseHandler is the handler invoked when the server stops.
+	CloseHandler func()
+	// ConnectHandler is the handler invoked when a connection is opened.
+	ConnectHandler func(conn Conn)
+	// DisconnectHandler is the handler invoked when a connection is closed.
 	DisconnectHandler func(conn Conn)
-	ReceiveHandler    func(conn Conn, data []byte)
+	// HeartbeatHandler is the handler invoked when a heartbeat is received.
+	//
+	// heartbeatTime is the time in nanoseconds at which the client received the heartbeat sent by the server.
+	HeartbeatHandler func(conn Conn, heartbeatTime int64)
+	// ReceiveHandler is the handler invoked when a message is received.
+	//
+	// The user layer controls when buf is released to avoid a memory leak.
+	ReceiveHandler func(conn Conn, buf buffer.Buffer)
+	// HandshakeHandler is the handler invoked when a handshake frame is received.
+	//
+	// Handshake frames are marked by a reserved bit of the packet header instead of a route, and
+	// they are dispatched before the receive handler. The user layer controls when buf is
+	// released to avoid a memory leak.
+	HandshakeHandler func(conn Conn, buf buffer.Buffer)
 )
 
+// Server is the server interface.
 type Server interface {
-	// Addr 监听地址
+	// Addr returns the listen address.
 	Addr() string
-	// Start 启动服务器
+	// Start starts the server.
 	Start() error
-	// Stop 关闭服务器
+	// Stop stops the server.
 	Stop() error
-	// Protocol 协议
+	// Protocol returns the protocol name.
 	Protocol() string
-	// OnStart 监听服务器启动
+	// OnStart registers the handler invoked when the server starts.
 	OnStart(handler StartHandler)
-	// OnStop 监听服务器关闭
+	// OnStop registers the handler invoked when the server stops.
 	OnStop(handler CloseHandler)
-	// OnConnect 监听连接打开
+	// OnConnect registers the handler invoked when a connection is opened.
 	OnConnect(handler ConnectHandler)
-	// OnReceive 监听接收消息
+	// OnHeartbeat registers the handler invoked when a heartbeat is received.
+	OnHeartbeat(handler HeartbeatHandler)
+	// OnReceive registers the handler invoked when a message is received.
 	OnReceive(handler ReceiveHandler)
-	// OnDisconnect 监听连接断开
+	// OnHandshake registers the handler invoked when a handshake frame is received.
+	OnHandshake(handler HandshakeHandler)
+	// OnDisconnect registers the handler invoked when a connection is closed.
 	OnDisconnect(handler DisconnectHandler)
 }

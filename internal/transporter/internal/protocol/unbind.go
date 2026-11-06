@@ -2,24 +2,25 @@ package protocol
 
 import (
 	"encoding/binary"
-	"io"
 
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
+	"github.com/dobyte/due/v2/internal/transporter/internal/def"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
 )
 
 const (
-	unbindReqBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + b64
-	unbindResBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + defaultCodeBytes
+	unbindReqBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.B64
+	unbindResBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.CodeBytes
 )
 
-// EncodeUnbindReq 编码解绑请求
-// 协议：size + header + route + seq + uid
+// EncodeUnbindReq encodes an unbind request.
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {uid}
 func EncodeUnbindReq(seq uint64, uid int64) *buffer.NocopyBuffer {
 	writer := buffer.MallocWriter(unbindReqBytes)
-	writer.WriteUint32s(binary.BigEndian, uint32(unbindReqBytes-defaultSizeBytes))
-	writer.WriteUint8s(dataBit)
+	writer.WriteUint32s(binary.BigEndian, uint32(unbindReqBytes-def.SizeBytes))
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Unbind)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteInt64s(binary.BigEndian, uid)
@@ -27,37 +28,27 @@ func EncodeUnbindReq(seq uint64, uid int64) *buffer.NocopyBuffer {
 	return buffer.NewNocopyBuffer(writer)
 }
 
-// DecodeUnbindReq 解码解绑请求
-// 协议：size + header + route + seq + uid
-func DecodeUnbindReq(data []byte) (seq uint64, uid int64, err error) {
-	if len(data) != unbindReqBytes {
+// DecodeUnbindReq decodes an unbind request.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {uid}
+func DecodeUnbindReq(buf buffer.Buffer) (uid int64, err error) {
+	if buf.Len() != def.B64 {
 		err = errors.ErrInvalidMessage
 		return
 	}
 
-	reader := buffer.NewReader(data)
-
-	if _, err = reader.Seek(defaultSizeBytes+defaultHeaderBytes+defaultRouteBytes, io.SeekStart); err != nil {
-		return
-	}
-
-	if seq, err = reader.ReadUint64(binary.BigEndian); err != nil {
-		return
-	}
-
-	if uid, err = reader.ReadInt64(binary.BigEndian); err != nil {
-		return
-	}
+	uid = int64(binary.BigEndian.Uint64(buf.Bytes()))
 
 	return
 }
 
-// EncodeUnbindRes 编码解绑响应
-// 协议：size + header + route + seq + code
+// EncodeUnbindRes encodes an unbind response.
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {code}
 func EncodeUnbindRes(seq uint64, code uint16) *buffer.NocopyBuffer {
 	writer := buffer.MallocWriter(unbindResBytes)
-	writer.WriteUint32s(binary.BigEndian, uint32(unbindResBytes-defaultSizeBytes))
-	writer.WriteUint8s(dataBit)
+	writer.WriteUint32s(binary.BigEndian, uint32(unbindResBytes-def.SizeBytes))
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Unbind)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint16s(binary.BigEndian, code)
@@ -65,23 +56,13 @@ func EncodeUnbindRes(seq uint64, code uint16) *buffer.NocopyBuffer {
 	return buffer.NewNocopyBuffer(writer)
 }
 
-// DecodeUnbindRes 解码解绑响应
-// 协议：size + header + route + seq + code
-func DecodeUnbindRes(data []byte) (code uint16, err error) {
-	if len(data) != unbindResBytes {
-		err = errors.ErrInvalidMessage
-		return
+// DecodeUnbindRes decodes an unbind response.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {code}
+func DecodeUnbindRes(buf buffer.Buffer) (uint16, error) {
+	if buf.Len() != def.CodeBytes {
+		return 0, errors.ErrInvalidMessage
 	}
 
-	reader := buffer.NewReader(data)
-
-	if _, err = reader.Seek(-defaultCodeBytes, io.SeekEnd); err != nil {
-		return
-	}
-
-	if code, err = reader.ReadUint16(binary.BigEndian); err != nil {
-		return
-	}
-
-	return
+	return binary.BigEndian.Uint16(buf.Bytes()), nil
 }

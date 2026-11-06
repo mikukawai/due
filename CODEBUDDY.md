@@ -4,7 +4,7 @@ This file provides guidance to CodeBuddy Code when working with code in this rep
 
 ## 项目简介
 
-due 是一个基于 Go 语言开发的高性能分布式游戏服务器框架。根目录是主模块 `github.com/dobyte/due/v2`，模块设计借鉴了 kratos，采用组件化 + 集群化的架构。当前分支对应 v2.5.8，go.mod 要求 `go 1.25.0`。
+due 是一个基于 Go 语言开发的高性能分布式游戏服务器框架。根目录是主模块 `github.com/dobyte/due/v2`，模块设计借鉴了 kratos，采用组件化 + 集群化的架构。当前升级分支对应 v2.6.6，go.mod 要求 `go 1.27.0` 或更新版本。开发约束以根 `AGENTS.md` 与 `.harness/rules/` 为准；本文件仅补充自定义应用入口。
 
 ## 常用命令
 
@@ -15,7 +15,7 @@ due 是一个基于 Go 语言开发的高性能分布式游戏服务器框架。
 
 ### 重要：多模块仓库
 
-本仓库每个子模块（`network/tcp`、`network/ws`、`registry/consul`、`registry/etcd`、`eventbus/redis`、`cache/redis`、`lock/redis`、`config/etcd`、`transport/grpc` 等约 26 个）都有独立的 `go.mod`，import path 为 `github.com/dobyte/due/<路径>/v2`。**修改子模块代码后，需要在对应子模块目录内单独执行 `go build ./...` / `go test ./...`**，仅构建根模块不会编译子模块。
+本仓库每个子模块（`network/tcp`、`network/ws`、`registry/consul`、`registry/etcd`、`eventbus/redis`、`cache/redis`、`lock/redis`、`config/etcd`、`transport/grpc` 等 28 个上游子模块，以及 gate/node/client/mcp-client 四个自定义应用）都有独立的 `go.mod`，import path 为 `github.com/dobyte/due/<路径>/v2`。**修改子模块代码后，需要在对应子模块目录内单独执行 `go build ./...` / `go test ./...`**，仅构建根模块不会编译子模块。
 
 ### 测试依赖外部中间件
 
@@ -66,7 +66,7 @@ container.Serve()                     // 启动
 - `config`：配置中心，供业务动态配置，支持热更新；实现有 file/etcd/consul/nacos。
 - `network`：网络抽象层（`network.Server`/`network.Conn`/`network.Client` 接口），实现有 tcp/ws/kcp，每个都同时提供 server 与 client。
 - `packet`：消息打包器，定义了线上 wire protocol（见 README 第 6 节）：`size(4B) + header(1B，含心跳位) + route(默认2B) + seq(默认2B) + message`；route/seq 字节数可通过 `[packet]` 配置调整。业务消息用 `cluster.Message{Route, Data, Seq}` 描述。
-- `session`：会话管理，维护连接会话（CID）、用户会话（UID）以及频道订阅/发布，Gate 用它管理在线玩家。
+- 会话管理已内置到 `cluster/gate`，不再存在公开的 `session` 包。业务推送使用 `cluster.User` / `cluster.Conn` 与 `cluster.Session`。
 - `eventbus`：事件总线抽象，实现有 redis/nats/kafka，用于跨节点事件通知。
 - `transport`：Node 对外提供的微服务 RPC 通信方案，实现有 grpc/rpcx。
 - `codes`：统一业务错误码（gRPC 风格，OK=0 ~ TooManyRequests=10），业务错误码用 `codes.NewCode(...)` 创建。
@@ -76,8 +76,8 @@ container.Serve()                     // 启动
 
 ## 开发约定
 
-- 代码注释与提交说明为中文，README 为中文。
-- 时间获取统一用 `utils/xtime.Now()`（受 etc 的 timezone 配置控制），不要直接用 `time.Now()`。
+- 注释与提交遵循当前 `AGENTS.md` / Harness 规范；本地新增的迁移说明可用中文，提交标题及正文使用英文。
+- 无强制时区要求时使用标准库 `time`；明确需要配置时区的场景再选择 `xtime`，遵循 DUE-004。
 - 业务错误统一走 `codes` 包的错误码，`ctx.Response` / 接口返回用 `codes.OK` 等。
 - 依赖注入风格：组件通过 `WithXxx` 选项函数（options.go）注入依赖（如 `gate.WithServer`、`gate.WithRegistry`），并遵循 `defaultOptions()` + 选项覆盖的模式。
 - 添加新子模块时，需同时更新 `tidy.sh` 中的模块清单。

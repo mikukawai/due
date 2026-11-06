@@ -11,66 +11,74 @@ import (
 )
 
 type Route struct {
-	abstract
-	route      registry.Route // 路由信息
-	group      string         // 路由所属组
-	counter    atomic.Uint64  // 轮询计数器
-	dispatcher *Dispatcher    // 分发器
+	eps1       []*serviceEndpoint                 // All endpoints, including instances in the work state
+	eps2       []*serviceEndpoint                 // All endpoints, including instances in the busy state
+	eps3       map[string]*serviceEndpoint        // All endpoints, including instances in the work, busy and hang states
+	route      registry.Route                     // Route information
+	group      string                             // Group the route belongs to
+	counter    atomic.Uint64                      // Round-robin counter
+	wrSeq      atomic.Pointer[[]*serviceEndpoint] // Precomputed smooth weighted round-robin sequence (built lazily)
+	dispatcher *Dispatcher                        // Dispatcher
 }
 
 func newRoute(dispatcher *Dispatcher, group string, route registry.Route) *Route {
-	return &Route{
+	r := &Route{
+		eps1:       make([]*serviceEndpoint, 0),
+		eps2:       make([]*serviceEndpoint, 0),
+		eps3:       make(map[string]*serviceEndpoint),
 		route:      route,
 		group:      group,
 		dispatcher: dispatcher,
-		abstract:   newAbstract(),
 	}
+
+	return r
 }
 
-// ID 获取路由ID
+// ID returns the route ID.
 func (r *Route) ID() int32 {
 	return r.route.ID
 }
 
-// Group 路由所属组
+// Group returns the group the route belongs to.
 func (r *Route) Group() string {
 	return r.group
 }
 
-// Internal 是否内部路由
+// Internal reports whether the route is internal.
 func (r *Route) Internal() bool {
 	return r.route.Internal
 }
 
-// Stateful 是否有状态路由
+// Stateful reports whether the route is stateful.
 func (r *Route) Stateful() bool {
 	return r.route.Stateful
 }
 
-// Authorized 是否授权路由
+// Authorized reports whether the route requires authorization.
 func (r *Route) Authorized() bool {
 	return r.route.Authorized
 }
 
-// FindEndpoint 查询路由服务端点
+// FindEndpoint returns a service endpoint of the route. When insID is provided and non-empty, the
+// endpoint is resolved directly; otherwise it is chosen according to the dispatcher's strategy.
 func (r *Route) FindEndpoint(insID ...string) (*endpoint.Endpoint, error) {
-	if len(insID) == 0 || insID[0] == "" {
+	if len(insID) > 0 && insID[0] != "" {
+		return r.directDispatch(insID[0])
+	} else {
 		switch r.dispatcher.dispatch {
 		case cluster.RoundRobin:
 			return r.roundRobinDispatch()
-		case cluster.WeightRoundRobin:
-			return r.weightRoundRobinDispatch()
+		case cluster.WeightedRoundRobin:
+			return r.weightedRoundRobinDispatch()
 		default:
 			return r.randomDispatch()
 		}
 	}
-
-	return r.directDispatch(insID[0])
 }
 
-// 直接分配
+// directDispatch resolves the endpoint of the instance identified by insID.
 func (r *Route) directDispatch(insID string) (*endpoint.Endpoint, error) {
-	sep, ok := r.endpoints5[insID]
+	sep, ok := r.eps3[insID]
 	if !ok {
 		return nil, errors.ErrNotFoundEndpoint
 	}
@@ -78,76 +86,135 @@ func (r *Route) directDispatch(insID string) (*endpoint.Endpoint, error) {
 	return sep.endpoint, nil
 }
 
-// 随机分配
+// randomDispatch picks an available endpoint at random.
 func (r *Route) randomDispatch() (*endpoint.Endpoint, error) {
-	if n := len(r.endpoints1); n > 0 {
-		return r.endpoints1[rand.IntN(n)].endpoint, nil
+	if eps := r.loadAvailableEndpoints(); len(eps) == 0 {
+		return nil, errors.ErrNotFoundEndpoint
+	} else {
+		return eps[rand.IntN(len(eps))].endpoint, nil
 	}
-
-	if n := len(r.endpoints2); n > 0 {
-		return r.endpoints2[rand.IntN(n)].endpoint, nil
-	}
-
-	return nil, errors.ErrNotFoundEndpoint
 }
 
-// 轮询分配
+// roundRobinDispatch picks an available endpoint in round-robin order.
 func (r *Route) roundRobinDispatch() (*endpoint.Endpoint, error) {
-	if n := len(r.endpoints1); n > 0 {
-		index := int(r.counter.Add(1) % uint64(n))
-
-		return r.endpoints1[index].endpoint, nil
+	if eps := r.loadAvailableEndpoints(); len(eps) == 0 {
+		return nil, errors.ErrNotFoundEndpoint
+	} else {
+		return eps[(r.counter.Add(1)-1)%uint64(len(eps))].endpoint, nil
 	}
-
-	if n := len(r.endpoints2); n > 0 {
-		index := int(r.counter.Add(1) % uint64(n))
-
-		return r.endpoints2[index].endpoint, nil
-	}
-
-	return nil, errors.ErrNotFoundEndpoint
 }
 
-// 加权轮询分配
-func (r *Route) weightRoundRobinDispatch() (*endpoint.Endpoint, error) {
+// weightedRoundRobinDispatch picks an available endpoint using smooth weighted round-robin.
+//
+// It selects endpoints from a precomputed smooth sequence through an atomic cursor, leaving the hot
+// path lock-free. Because the selection sequence of smooth weighted round-robin (SWRR) is periodic,
+// the precomputed distribution is exactly equivalent to the online one.
+func (r *Route) weightedRoundRobinDispatch() (*endpoint.Endpoint, error) {
+	eps := r.loadAvailableEndpoints()
+	if len(eps) == 0 {
+		return nil, errors.ErrNotFoundEndpoint
+	}
+
+	seq := r.loadWRSequence(eps)
+
+	return seq[(r.counter.Add(1)-1)%uint64(len(seq))].endpoint, nil
+}
+
+// loadWRSequence returns the smooth weighted round-robin sequence built from eps.
+//
+// The sequence is built lazily. Concurrent builds produce identical content, so a failed
+// compare-and-swap simply reuses the stored value.
+func (r *Route) loadWRSequence(eps []*serviceEndpoint) []*serviceEndpoint {
+	if seq := r.wrSeq.Load(); seq != nil {
+		return *seq
+	}
+
+	seq := buildSmoothWRSequence(eps)
+
+	if r.wrSeq.CompareAndSwap(nil, &seq) {
+		return seq
+	}
+
+	return *r.wrSeq.Load()
+}
+
+// buildSmoothWRSequence builds the smooth weighted round-robin sequence from eps.
+//
+// The selection sequence is generated offline with the smooth weighted round-robin algorithm, and
+// the weights are reduced by their GCD to bound the sequence length. A weight that is unset (<= 0)
+// falls back to the default weight 1, matching the behavior of the original online algorithm.
+func buildSmoothWRSequence(eps []*serviceEndpoint) []*serviceEndpoint {
+	weights := make([]int, len(eps))
+
+	g := 0
+	for i, se := range eps {
+		weight := se.weight
+		if weight <= 0 {
+			weight = 1
+		}
+		weights[i] = weight
+		g = gcd(g, weight)
+	}
+
+	var total int
+	for i := range weights {
+		weights[i] /= g
+		total += weights[i]
+	}
+
 	var (
-		selected    *serviceEndpoint
-		totalWeight int
+		curr = make([]int, len(eps))
+		seq  = make([]*serviceEndpoint, 0, total)
 	)
 
-	if len(r.endpoints1) > 0 {
-		for i := range r.endpoints1 {
-			se := r.endpoints1[i]
-			se.currWeight += se.weight
-
-			totalWeight += se.weight
-
-			if selected == nil || se.currWeight > selected.currWeight {
-				selected = se
+	for range total {
+		selected := 0
+		for i := range eps {
+			curr[i] += weights[i]
+			if curr[i] > curr[selected] {
+				selected = i
 			}
 		}
-
-		selected.currWeight -= totalWeight
-
-		return selected.endpoint, nil
+		curr[selected] -= total
+		seq = append(seq, eps[selected])
 	}
 
-	if len(r.endpoints2) > 0 {
-		for i := range r.endpoints2 {
-			se := r.endpoints2[i]
-			se.currWeight += se.weight
+	return seq
+}
 
-			totalWeight += se.weight
-
-			if selected == nil || se.currWeight > selected.currWeight {
-				selected = se
-			}
-		}
-
-		selected.currWeight -= totalWeight
-
-		return selected.endpoint, nil
+// gcd returns the greatest common divisor of a and b.
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
 	}
 
-	return nil, errors.ErrNotFoundEndpoint
+	return a
+}
+
+// loadAvailableEndpoints returns the endpoints currently eligible to serve traffic.
+func (r *Route) loadAvailableEndpoints() []*serviceEndpoint {
+	switch {
+	case len(r.eps1) > 0:
+		return r.eps1
+	case len(r.eps2) > 0:
+		return r.eps2
+	default:
+		return nil
+	}
+}
+
+// addServiceEndpoint adds a service endpoint to the route according to the instance state.
+func (r *Route) addServiceEndpoint(se *serviceEndpoint) {
+	switch se.state {
+	case cluster.Work.String():
+		r.eps1 = append(r.eps1, se)
+	case cluster.Busy.String():
+		r.eps2 = append(r.eps2, se)
+	case cluster.Hang.String():
+		// ignore
+	default:
+		return
+	}
+
+	r.eps3[se.insID] = se
 }

@@ -6,10 +6,12 @@ import (
 	"github.com/dobyte/due/v2/utils/xreflect"
 )
 
+// Uint8 converts val to a uint8.
 func Uint8(val any) uint8 {
 	return uint8(Uint64(val))
 }
 
+// Uint8s converts val to a uint8 slice.
 func Uint8s(val any) (slice []uint8) {
 	if val == nil {
 		return
@@ -22,6 +24,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]int:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -32,6 +37,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]int8:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -42,6 +50,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]int16:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -52,6 +63,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]int32:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -62,6 +76,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]int64:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -72,6 +89,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]uint:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -79,6 +99,9 @@ func Uint8s(val any) (slice []uint8) {
 	case []uint8:
 		return v
 	case *[]uint8:
+		if v == nil {
+			return
+		}
 		return *v
 	case []uint16:
 		slice = make([]uint8, len(v))
@@ -86,6 +109,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]uint16:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -96,6 +122,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]uint32:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -106,6 +135,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]uint64:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -116,6 +148,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]float32:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -126,6 +161,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]float64:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -136,6 +174,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]complex64:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -146,6 +187,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]complex128:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -156,6 +200,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]string:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -166,6 +213,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]bool:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -176,6 +226,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[]any:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -186,6 +239,9 @@ func Uint8s(val any) (slice []uint8) {
 			slice[i] = Uint8(v[i])
 		}
 	case *[][]byte:
+		if v == nil {
+			return
+		}
 		slice = make([]uint8, len(*v))
 		for i := range *v {
 			slice[i] = Uint8((*v)[i])
@@ -204,11 +260,13 @@ func Uint8s(val any) (slice []uint8) {
 	return
 }
 
+// Uint8Pointer converts val to a pointer to uint8.
 func Uint8Pointer(val any) *uint8 {
 	v := Uint8(val)
 	return &v
 }
 
+// Uint8sPointer converts val to a pointer to a uint8 slice.
 func Uint8sPointer(val any) *[]uint8 {
 	v := Uint8s(val)
 	return &v

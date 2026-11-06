@@ -13,7 +13,6 @@ import (
 	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/cluster/node"
 	"github.com/dobyte/due/v2/log"
-	"github.com/dobyte/due/v2/session"
 )
 
 const (
@@ -541,7 +540,7 @@ func (m *Manager) pushMessage(gid string, uid int64, route int32, data any) {
 
 	if err := m.proxy.Push(context.Background(), &cluster.PushArgs{
 		GID:    gid,
-		Kind:   session.User,
+		Kind:   cluster.User,
 		Target: uid,
 		Message: &cluster.Message{
 			Route: route,

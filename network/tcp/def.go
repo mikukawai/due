@@ -1,13 +1,40 @@
 package tcp
 
-const protocol = "tcp"
+import (
+	"crypto/tls"
+	"net"
 
-const (
-	closeSig   int8 = iota // 关闭信号
-	dataPacket             // 数据包
+	"github.com/pires/go-proxyproto"
 )
 
-type task struct {
-	typ int8
-	msg []byte
+// protocol is the protocol identifier.
+const protocol = "tcp"
+
+// maxBatchWriteNum is the maximum number of tasks in a single batch write.
+const maxBatchWriteNum = 64
+
+// minWriteQueueSize is the minimum write queue size.
+const minWriteQueueSize = 128
+
+// setNoDelay enables the TCP_NODELAY option, which turns off the Nagle algorithm.
+func setNoDelay(conn net.Conn) {
+	switch ccc := conn.(type) {
+	case *proxyproto.Conn:
+		switch cc := ccc.Raw().(type) {
+		case *net.TCPConn:
+			cc.SetNoDelay(true)
+		case *tls.Conn:
+			if c, ok := cc.NetConn().(*net.TCPConn); ok {
+				c.SetNoDelay(true)
+			}
+		}
+	case *tls.Conn:
+		if c, ok := ccc.NetConn().(*net.TCPConn); ok {
+			c.SetNoDelay(true)
+		}
+	default:
+		if c, ok := conn.(*net.TCPConn); ok {
+			c.SetNoDelay(true)
+		}
+	}
 }

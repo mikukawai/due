@@ -4,16 +4,21 @@ import (
 	"context"
 	"sync"
 
+	"github.com/dobyte/due/v2/core/value"
+	"github.com/dobyte/due/v2/encoding/json"
 	"github.com/dobyte/due/v2/eventbus"
+	"github.com/dobyte/due/v2/log"
+	"github.com/dobyte/due/v2/utils/xconv"
+	"github.com/dobyte/due/v2/utils/xtime"
+	"github.com/dobyte/due/v2/utils/xuuid"
 	"github.com/nats-io/nats.go"
 )
 
 type Eventbus struct {
-	err       error
-	opts      *options
-	builtin   bool
-	rw        sync.RWMutex
-	consumers map[string]*consumer
+	err     error
+	opts    *options
+	builtin bool
+	pool    *sync.Pool
 }
 
 func NewEventbus(opts ...Option) *Eventbus {
@@ -22,9 +27,9 @@ func NewEventbus(opts ...Option) *Eventbus {
 		opt(o)
 	}
 
-	eb := &Eventbus{opts: o}
+	eb := &Eventbus{}
 	eb.opts = o
-	eb.consumers = make(map[string]*consumer)
+	eb.pool = &sync.Pool{New: func() any { return &data{} }}
 
 	if o.conn == nil {
 		o.conn, eb.err = nats.Connect(o.url, nats.Timeout(o.timeout))
@@ -34,13 +39,13 @@ func NewEventbus(opts ...Option) *Eventbus {
 	return eb
 }
 
-// Publish 发布事件
+// Publish publishes an event.
 func (eb *Eventbus) Publish(ctx context.Context, topic string, payload any) error {
 	if eb.err != nil {
 		return eb.err
 	}
 
-	buf, err := serialize(topic, payload)
+	buf, err := eb.serialize(topic, payload)
 	if err != nil {
 		return err
 	}
@@ -48,62 +53,44 @@ func (eb *Eventbus) Publish(ctx context.Context, topic string, payload any) erro
 	return eb.opts.conn.Publish(eb.doMakeChannel(topic), buf)
 }
 
-// Subscribe 订阅事件
-func (eb *Eventbus) Subscribe(ctx context.Context, topic string, handler eventbus.EventHandler) error {
+// Subscribe subscribes to an event.
+func (eb *Eventbus) Subscribe(ctx context.Context, topic string, handler eventbus.EventHandler, balance ...bool) (eventbus.Subscription, error) {
 	if eb.err != nil {
-		return eb.err
+		return nil, eb.err
 	}
 
-	channel := eb.doMakeChannel(topic)
+	var (
+		err     error
+		sub     *nats.Subscription
+		channel = eb.doMakeChannel(topic)
+	)
 
-	eb.rw.Lock()
-	defer eb.rw.Unlock()
+	if len(balance) > 0 && balance[0] {
+		sub, err = eb.opts.conn.QueueSubscribe(channel, "queue", eb.subscribeHandler(handler))
+	} else {
+		sub, err = eb.opts.conn.Subscribe(channel, eb.subscribeHandler(handler))
+	}
+	if err != nil {
+		return nil, err
+	}
 
-	c, ok := eb.consumers[channel]
-	if !ok {
-		c = &consumer{handlers: make(map[uintptr][]eventbus.EventHandler)}
-		sub, err := eb.opts.conn.Subscribe(channel, func(msg *nats.Msg) {
-			c.dispatch(msg.Data)
-		})
+	return &subscription{sub: sub}, nil
+}
+
+// subscribeHandler returns the handler that handles subscribed events.
+func (eb *Eventbus) subscribeHandler(handler eventbus.EventHandler) func(msg *nats.Msg) {
+	return func(msg *nats.Msg) {
+		event, err := eb.deserialize(msg.Data)
 		if err != nil {
-			return err
+			log.Errorf("invalid event data: %v", err)
+			return
 		}
-		c.sub = sub
-		eb.consumers[channel] = c
+
+		handler(event)
 	}
-
-	c.addHandler(handler)
-
-	return nil
 }
 
-// Unsubscribe 取消订阅
-func (eb *Eventbus) Unsubscribe(ctx context.Context, topic string, handler eventbus.EventHandler) error {
-	if eb.err != nil {
-		return eb.err
-	}
-
-	channel := eb.doMakeChannel(topic)
-
-	eb.rw.Lock()
-	defer eb.rw.Unlock()
-
-	if c, ok := eb.consumers[channel]; ok {
-		if c.delHandler(handler) != 0 {
-			return nil
-		}
-
-		if err := c.sub.Unsubscribe(); err != nil {
-			return err
-		}
-
-		delete(eb.consumers, channel)
-	}
-
-	return nil
-}
-
-// Close 停止监听
+// Close stops listening.
 func (eb *Eventbus) Close() error {
 	if eb.err != nil {
 		return eb.err
@@ -122,4 +109,34 @@ func (eb *Eventbus) doMakeChannel(topic string) string {
 	} else {
 		return eb.opts.prefix + ":" + topic
 	}
+}
+
+// serialize serializes an event.
+func (eb *Eventbus) serialize(topic string, payload any) ([]byte, error) {
+	d := eb.pool.Get().(*data)
+	defer eb.pool.Put(d)
+
+	d.ID = xuuid.UUID()
+	d.Topic = topic
+	d.Payload = xconv.String(payload)
+	d.Timestamp = xtime.Now().UnixNano()
+
+	return json.Marshal(d)
+}
+
+// deserialize deserializes an event.
+func (eb *Eventbus) deserialize(v []byte) (*eventbus.Event, error) {
+	d := eb.pool.Get().(*data)
+	defer eb.pool.Put(d)
+
+	if err := json.Unmarshal(v, d); err != nil {
+		return nil, err
+	}
+
+	return &eventbus.Event{
+		ID:        d.ID,
+		Topic:     d.Topic,
+		Payload:   value.NewValue(d.Payload),
+		Timestamp: xtime.UnixNano(d.Timestamp),
+	}, nil
 }

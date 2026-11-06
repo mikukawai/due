@@ -4,27 +4,36 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/IBM/sarama"
+	"github.com/dobyte/due/v2/core/value"
+	"github.com/dobyte/due/v2/encoding/json"
+	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/eventbus"
+	"github.com/dobyte/due/v2/log"
+	"github.com/dobyte/due/v2/utils/xconv"
+	"github.com/dobyte/due/v2/utils/xtime"
+	"github.com/dobyte/due/v2/utils/xuuid"
 )
 
+// Eventbus is a Kafka eventbus.
 type Eventbus struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	opts         *options
 	err          error
-	err1         error
 	consumer     sarama.Consumer
-	err2         error
-	producer     sarama.AsyncProducer
-	err3         error
+	producer     sarama.SyncProducer
 	clusterAdmin sarama.ClusterAdmin
 	builtin      bool
+	pool         *sync.Pool
 	rw           sync.RWMutex
 	consumers    map[string]*consumer
+	closed       atomic.Bool
 }
 
+// NewEventbus returns a new eventbus.
 func NewEventbus(opts ...Option) *Eventbus {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -33,12 +42,14 @@ func NewEventbus(opts ...Option) *Eventbus {
 
 	eb := &Eventbus{}
 	eb.opts = o
+	eb.pool = &sync.Pool{New: func() any { return &data{} }}
 	eb.consumers = make(map[string]*consumer)
 	eb.ctx, eb.cancel = context.WithCancel(o.ctx)
 
 	if o.client == nil {
 		config := sarama.NewConfig()
 		config.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.NewBalanceStrategyRoundRobin()}
+		config.Consumer.Offsets.Initial = sarama.OffsetNewest
 		config.Consumer.Return.Errors = true
 		config.Producer.Partitioner = sarama.NewHashPartitioner
 		config.Producer.RequiredAcks = sarama.WaitForAll
@@ -62,137 +73,211 @@ func NewEventbus(opts ...Option) *Eventbus {
 		eb.builtin = true
 	}
 
-	eb.consumer, eb.err1 = sarama.NewConsumerFromClient(o.client)
-	eb.producer, eb.err2 = sarama.NewAsyncProducerFromClient(o.client)
+	eb.consumer, eb.err = sarama.NewConsumerFromClient(o.client)
+	if eb.err != nil {
+		if eb.builtin {
+			_ = o.client.Close()
+		}
+		return eb
+	}
+
+	eb.producer, eb.err = sarama.NewSyncProducerFromClient(o.client)
+	if eb.err != nil {
+		_ = eb.consumer.Close()
+		if eb.builtin {
+			_ = o.client.Close()
+		}
+		return eb
+	}
 
 	if o.autoCreateTopic {
-		eb.clusterAdmin, eb.err3 = sarama.NewClusterAdminFromClient(o.client)
+		if clusterAdmin, err := sarama.NewClusterAdminFromClient(o.client); err != nil {
+			log.Warnf("create cluster admin failed: %v", err)
+			o.autoCreateTopic = false
+		} else {
+			eb.clusterAdmin = clusterAdmin
+		}
 	}
 
 	return eb
 }
 
-// Publish 发布事件
+// Publish publishes an event.
 func (eb *Eventbus) Publish(ctx context.Context, topic string, payload any) error {
 	if eb.err != nil {
 		return eb.err
 	}
 
-	if eb.err2 != nil {
-		return eb.err2
+	if eb.closed.Load() {
+		return errors.ErrIllegalOperation
 	}
 
-	buf, err := serialize(topic, payload)
+	buf, err := eb.serialize(topic, payload)
 	if err != nil {
 		return err
-	}
-
-	eb.producer.Input() <- &sarama.ProducerMessage{
-		Topic: eb.doMakeChannel(topic),
-		Value: sarama.ByteEncoder(buf),
 	}
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-eb.producer.Successes():
-		return nil
-	case err = <-eb.producer.Errors():
+	default:
+		_, _, err = eb.producer.SendMessage(&sarama.ProducerMessage{
+			Topic: eb.doMakeChannel(topic),
+			Value: sarama.ByteEncoder(buf),
+		})
 		return err
 	}
 }
 
-// Subscribe 订阅事件
-func (eb *Eventbus) Subscribe(_ context.Context, topic string, handler eventbus.EventHandler) error {
+// Subscribe subscribes to an event.
+func (eb *Eventbus) Subscribe(ctx context.Context, topic string, handler eventbus.EventHandler, balance ...bool) (eventbus.Subscription, error) {
 	if eb.err != nil {
-		return eb.err
+		return nil, eb.err
 	}
 
-	if eb.err1 != nil {
-		return eb.err1
+	if eb.closed.Load() {
+		return nil, errors.ErrIllegalOperation
 	}
 
 	channel := eb.doMakeChannel(topic)
+	lb := len(balance) > 0 && balance[0]
 
-	if eb.opts.autoCreateTopic {
-		if eb.err3 != nil {
-			return eb.err3
+	// Fast path: reuse the existing consumer, holding the lock to avoid racing with unsubscribe and close.
+	eb.rw.Lock()
+	if c, ok := eb.consumers[channel]; ok {
+		if c.balance != lb {
+			eb.rw.Unlock()
+			return nil, errors.ErrInvalidArgument
 		}
 
+		sub := c.addSubscription(handler)
+		sub.eb = eb
+		sub.topic = channel
+
+		eb.rw.Unlock()
+
+		return sub, nil
+	}
+	eb.rw.Unlock()
+
+	// Slow path: perform the network I/O outside the lock to avoid holding it for a long time.
+	if eb.opts.autoCreateTopic && eb.clusterAdmin != nil {
 		if err := eb.clusterAdmin.CreateTopic(channel, &sarama.TopicDetail{
-			NumPartitions:     1,
-			ReplicationFactor: 1,
+			NumPartitions:     eb.opts.partitions,
+			ReplicationFactor: eb.opts.replicationFactor,
 		}, true); err != nil {
 			if e, ok := err.(*sarama.TopicError); ok && e.Err == sarama.ErrTopicAlreadyExists {
 				// ignore
 			} else {
-				return err
+				return nil, err
 			}
 		}
 	}
 
-	eb.rw.Lock()
-	c, ok := eb.consumers[channel]
-	if !ok {
-		c = &consumer{handlers: make(map[uintptr][]eventbus.EventHandler)}
-		c.ctx, c.cancel = context.WithCancel(eb.ctx)
-		eb.consumers[channel] = c
+	c := newConsumer(eb, lb)
+
+	var partitions []int32
+	if lb {
+		groupID := eb.doMakeGroupID(topic)
+		group, err := sarama.NewConsumerGroupFromClient(groupID, eb.opts.client)
+		if err != nil {
+			return nil, err
+		}
+		c.group = group
+	} else {
+		var err error
+		if partitions, err = eb.consumer.Partitions(channel); err != nil {
+			return nil, err
+		}
 	}
-	c.addHandler(handler)
+
+	// Acquire the lock to finish registration and startup, avoiding concurrent duplicate consumer creation.
+	eb.rw.Lock()
+
+	if eb.closed.Load() {
+		eb.rw.Unlock()
+
+		if c.group != nil {
+			_ = c.group.Close()
+		}
+		return nil, errors.ErrIllegalOperation
+	}
+
+	if existing, ok := eb.consumers[channel]; ok {
+		if existing.balance != lb {
+			eb.rw.Unlock()
+
+			if c.group != nil {
+				_ = c.group.Close()
+			}
+			return nil, errors.ErrInvalidArgument
+		}
+
+		sub := existing.addSubscription(handler)
+		sub.eb = eb
+		sub.topic = channel
+
+		eb.rw.Unlock()
+
+		if c.group != nil {
+			_ = c.group.Close()
+		}
+
+		return sub, nil
+	}
+
+	// Add the first subscription before starting consumption, so that messages are not dropped once
+	// consumption starts without a handler.
+	sub := c.addSubscription(handler)
+	sub.eb = eb
+	sub.topic = channel
+
+	eb.consumers[channel] = c
+
+	if lb {
+		c.startGroupConsumer(c.group, channel)
+	} else {
+		c.startBroadcastConsumer(eb.consumer, partitions, channel)
+	}
+
 	eb.rw.Unlock()
 
-	if !ok {
-		return eb.watch(c, channel)
-	}
-
-	return nil
+	return sub, nil
 }
 
-// Unsubscribe 取消订阅
-func (eb *Eventbus) Unsubscribe(_ context.Context, topic string, handler eventbus.EventHandler) error {
-	if eb.err != nil {
-		return eb.err
-	}
-
-	if eb.err1 != nil {
-		return eb.err1
-	}
-
-	channel := eb.doMakeChannel(topic)
-
-	eb.rw.Lock()
-	defer eb.rw.Unlock()
-
-	if c, ok := eb.consumers[channel]; ok {
-		if c.delHandler(handler) != 0 {
-			return nil
-		}
-		c.cancel()
-		delete(eb.consumers, channel)
-	}
-
-	return nil
-}
-
-// Close 停止监听
+// Close stops listening.
 func (eb *Eventbus) Close() error {
 	if eb.err != nil {
 		return eb.err
 	}
 
-	if eb.err1 == nil && eb.consumer != nil {
-		_ = eb.consumer.Close()
-	}
-
-	if eb.err2 == nil && eb.producer != nil {
-		_ = eb.producer.Close()
-	}
-
-	if eb.err3 == nil && eb.clusterAdmin != nil {
-		_ = eb.clusterAdmin.Close()
+	if !eb.closed.CompareAndSwap(false, true) {
+		return nil
 	}
 
 	eb.cancel()
+
+	eb.rw.Lock()
+	consumers := make([]*consumer, 0, len(eb.consumers))
+	for _, c := range eb.consumers {
+		consumers = append(consumers, c)
+	}
+	eb.consumers = make(map[string]*consumer)
+	eb.rw.Unlock()
+
+	for _, c := range consumers {
+		c.stop()
+		if c.group != nil {
+			_ = c.group.Close()
+		}
+	}
+
+	_ = eb.producer.Close()
+	_ = eb.consumer.Close()
+
+	if eb.clusterAdmin != nil {
+		_ = eb.clusterAdmin.Close()
+	}
 
 	if !eb.builtin {
 		return nil
@@ -201,35 +286,28 @@ func (eb *Eventbus) Close() error {
 	return eb.opts.client.Close()
 }
 
-func (eb *Eventbus) watch(c *consumer, topic string) error {
-	partitions, err := eb.consumer.Partitions(topic)
-	if err != nil {
-		return err
+// unsubscribe cancels a subscription.
+func (eb *Eventbus) unsubscribe(sub *subscription) {
+	eb.rw.Lock()
+
+	c, ok := eb.consumers[sub.topic]
+	if !ok {
+		eb.rw.Unlock()
+		return
 	}
 
-	for _, partition := range partitions {
-		cp, err := eb.consumer.ConsumePartition(topic, partition, sarama.OffsetNewest)
-		if err != nil {
-			return err
+	_, empty := c.delSubscription(sub)
+	if empty {
+		delete(eb.consumers, sub.topic)
+		eb.rw.Unlock()
+
+		c.stop()
+		if c.group != nil {
+			_ = c.group.Close()
 		}
-
-		go func(cp sarama.PartitionConsumer) {
-			defer cp.AsyncClose()
-
-			for {
-				select {
-				case <-c.ctx.Done():
-					return
-				case message := <-cp.Messages():
-					c.dispatch(message.Value)
-				case <-cp.Errors():
-					return
-				}
-			}
-		}(cp)
+	} else {
+		eb.rw.Unlock()
 	}
-
-	return nil
 }
 
 func (eb *Eventbus) doMakeChannel(topic string) string {
@@ -238,4 +316,50 @@ func (eb *Eventbus) doMakeChannel(topic string) string {
 	} else {
 		return strings.ReplaceAll(eb.opts.prefix, ":", ".") + "." + topic
 	}
+}
+
+func (eb *Eventbus) doMakeGroupID(topic string) string {
+	if eb.opts.prefix == "" {
+		return "due:eventbus:queue:" + topic
+	} else {
+		return strings.ReplaceAll(eb.opts.prefix, ":", ".") + ".queue." + topic
+	}
+}
+
+func (eb *Eventbus) serialize(topic string, payload any) ([]byte, error) {
+	d := eb.pool.Get().(*data)
+
+	d.ID = xuuid.UUID()
+	d.Topic = topic
+	d.Payload = xconv.String(payload)
+	d.Timestamp = xtime.Now().UnixNano()
+
+	buf, err := json.Marshal(d)
+	eb.pool.Put(d)
+
+	return buf, err
+}
+
+func (eb *Eventbus) deserialize(v []byte) (*eventbus.Event, error) {
+	d := eb.pool.Get().(*data)
+
+	if err := json.Unmarshal(v, d); err != nil {
+		eb.pool.Put(d)
+		return nil, err
+	}
+
+	event := &eventbus.Event{
+		ID:        d.ID,
+		Topic:     d.Topic,
+		Payload:   value.NewValue(d.Payload),
+		Timestamp: xtime.UnixNano(d.Timestamp),
+	}
+
+	d.ID = ""
+	d.Topic = ""
+	d.Payload = ""
+	d.Timestamp = 0
+	eb.pool.Put(d)
+
+	return event, nil
 }

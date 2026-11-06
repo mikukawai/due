@@ -1,47 +1,39 @@
 package dispatcher
 
-import "github.com/dobyte/due/v2/core/endpoint"
+import (
+	"github.com/dobyte/due/v2/cluster"
+	"github.com/dobyte/due/v2/core/endpoint"
+)
 
 type Event struct {
-	abstract
-	event int // 事件ID
+	eps   map[string]*serviceEndpoint // All endpoints, including instances in the work, busy and hang states
+	event int                         // Event ID
 }
 
 func newEvent(event int) *Event {
 	return &Event{
-		event:    event,
-		abstract: newAbstract(),
+		eps:   make(map[string]*serviceEndpoint),
+		event: event,
 	}
 }
 
-// Event 获取事件
+// Event returns the event ID.
 func (e *Event) Event() int {
 	return e.event
 }
 
-// VisitEndpoints 迭代服务端口
+// VisitEndpoints iterates over the service endpoints, stopping early when fn returns false.
 func (e *Event) VisitEndpoints(fn func(insID string, ep *endpoint.Endpoint) bool) {
-	for _, se := range e.endpoints1 {
-		if !fn(se.insID, se.endpoint) {
+	for insID, se := range e.eps {
+		if !fn(insID, se.endpoint) {
 			return
 		}
 	}
+}
 
-	for _, se := range e.endpoints2 {
-		if !fn(se.insID, se.endpoint) {
-			return
-		}
-	}
-
-	for _, se := range e.endpoints3 {
-		if !fn(se.insID, se.endpoint) {
-			return
-		}
-	}
-
-	for _, se := range e.endpoints4 {
-		if !fn(se.insID, se.endpoint) {
-			return
-		}
+// addServiceEndpoint adds a service endpoint unless the instance has been shut down.
+func (e *Event) addServiceEndpoint(se *serviceEndpoint) {
+	if se.state != cluster.Shut.String() {
+		e.eps[se.insID] = se
 	}
 }

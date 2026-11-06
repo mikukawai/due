@@ -1,62 +1,64 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/3/29 3:59 下午
- * @Desc: TODO
- */
-
 package network
 
 import (
 	"net"
+
+	"github.com/dobyte/due/v2/core/buffer"
 )
 
 const (
-	ConnOpened ConnState = iota + 1 // 连接打开
-	ConnHanged                      // 连接挂起
-	ConnClosed                      // 连接关闭
+	ConnOpened ConnState = iota + 1 // Connection opened
+	ConnHanged                      // Connection hanged
+	ConnClosed                      // Connection closed
 )
 
 type (
+	// ConnState is the connection state.
 	ConnState int32
 
+	// Conn is the connection interface.
 	Conn interface {
-		// ID 获取连接ID
+		// ID returns the connection ID.
 		ID() int64
-		// UID 获取用户ID
+		// UID returns the user ID.
 		UID() int64
-		// Attr 属性接口
+		// Attr returns the attribute interface of the connection.
 		Attr() Attr
-		// Bind 绑定用户ID
-		Bind(uid int64)
-		// Unbind 解绑用户ID
-		Unbind()
-		// Send 发送消息（同步）
-		Send(msg []byte) error
-		// Push 发送消息（异步）
-		Push(msg []byte) error
-		// State 获取连接状态
+		// Bind binds the connection to the given user ID.
+		Bind(uid int64) error
+		// Unbind unbinds the user ID from the connection.
+		Unbind() error
+		// Push sends a message with low priority.
+		//
+		// The caller controls when buf is released when the send fails.
+		Push(buf buffer.Buffer) error
+		// State returns the connection state.
 		State() ConnState
-		// Close 关闭连接
+		// Close closes the connection.
+		//
+		// When force is true the connection is closed forcibly.
 		Close(force ...bool) error
-		// LocalIP 获取本地IP
+		// LocalIP returns the local IP address.
 		LocalIP() (string, error)
-		// LocalAddr 获取本地地址
+		// LocalAddr returns the local address.
 		LocalAddr() (net.Addr, error)
-		// RemoteIP 获取远端IP
+		// RemoteIP returns the remote IP address.
 		RemoteIP() (string, error)
-		// RemoteAddr 获取远端地址
+		// RemoteAddr returns the remote address.
 		RemoteAddr() (net.Addr, error)
 	}
 
+	// Attr is the attribute interface of a connection.
 	Attr interface {
-		// Set 设置属性值
+		// Set sets the value of the attribute with the given key.
 		Set(key, value any)
-		// Get 获取属性值
+		// Get returns the value of the attribute with the given key and whether it exists.
 		Get(key any) (any, bool)
-		// Del 删除属性值
+		// Del deletes the attribute with the given key and reports whether the deletion succeeded.
 		Del(key any) bool
-		// Visit 访问所有的属性值
+		// Clear removes all attributes.
+		Clear()
+		// Visit calls fn for every attribute and stops when fn returns false.
 		Visit(fn func(key, value any) bool)
 	}
 )

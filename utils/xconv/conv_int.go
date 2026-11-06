@@ -6,10 +6,12 @@ import (
 	"github.com/dobyte/due/v2/utils/xreflect"
 )
 
+// Int converts val to an int.
 func Int(val any) int {
 	return int(Int64(val))
 }
 
+// Ints converts val to an int slice.
 func Ints(val any) (slice []int) {
 	if val == nil {
 		return
@@ -19,6 +21,9 @@ func Ints(val any) (slice []int) {
 	case []int:
 		return v
 	case *[]int:
+		if v == nil {
+			return
+		}
 		return *v
 	case []int8:
 		slice = make([]int, len(v))
@@ -26,6 +31,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]int8:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -36,6 +44,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]int16:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -46,6 +57,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]int32:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -56,6 +70,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]int64:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -66,6 +83,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]uint:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -76,6 +96,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]uint8:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -86,6 +109,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]uint16:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -96,6 +122,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]uint32:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -106,6 +135,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]uint64:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -116,6 +148,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]float32:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -126,6 +161,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]float64:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -136,6 +174,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]complex64:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -146,6 +187,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]complex128:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -156,6 +200,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]string:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -166,6 +213,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]bool:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -176,6 +226,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[]any:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -186,6 +239,9 @@ func Ints(val any) (slice []int) {
 			slice[i] = Int(v[i])
 		}
 	case *[][]byte:
+		if v == nil {
+			return
+		}
 		slice = make([]int, len(*v))
 		for i := range *v {
 			slice[i] = Int((*v)[i])
@@ -204,11 +260,13 @@ func Ints(val any) (slice []int) {
 	return
 }
 
+// IntPointer converts val to a pointer to int.
 func IntPointer(any any) *int {
 	v := Int(any)
 	return &v
 }
 
+// IntsPointer converts val to a pointer to an int slice.
 func IntsPointer(any any) *[]int {
 	v := Ints(any)
 	return &v

@@ -2,64 +2,259 @@ package kafka
 
 import (
 	"context"
-	"reflect"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/IBM/sarama"
 	"github.com/dobyte/due/v2/eventbus"
 	"github.com/dobyte/due/v2/log"
-	"github.com/dobyte/due/v2/task"
+	"github.com/dobyte/due/v2/utils/xcall"
+	"github.com/dobyte/due/v2/utils/xtime"
 )
 
+// consumer is an event consumer.
 type consumer struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	rw       sync.RWMutex
-	handlers map[uintptr][]eventbus.EventHandler
+	eb            *Eventbus
+	ctx           context.Context
+	cancel        context.CancelFunc
+	rw            sync.RWMutex
+	subscriptions []*subscription
+	balance       bool
+	idx           uint64
+	consumer      sarama.Consumer
+	group         sarama.ConsumerGroup
+	wg            sync.WaitGroup
 }
 
-// 添加处理器
-func (c *consumer) addHandler(handler eventbus.EventHandler) int {
-	pointer := reflect.ValueOf(handler).Pointer()
+// newConsumer returns a new event consumer.
+func newConsumer(eb *Eventbus, balance bool) *consumer {
+	c := &consumer{eb: eb, balance: balance, subscriptions: make([]*subscription, 0, 1)}
+	c.ctx, c.cancel = context.WithCancel(eb.ctx)
+	return c
+}
 
+// addSubscription adds a subscription.
+func (c *consumer) addSubscription(handler eventbus.EventHandler) *subscription {
+	sub := &subscription{consumer: c, handler: handler}
+
+	c.rw.Lock()
+	c.subscriptions = append(c.subscriptions, sub)
+	c.rw.Unlock()
+
+	return sub
+}
+
+// delSubscription removes a subscription.
+func (c *consumer) delSubscription(sub *subscription) (found bool, empty bool) {
 	c.rw.Lock()
 	defer c.rw.Unlock()
 
-	if _, ok := c.handlers[pointer]; !ok {
-		c.handlers[pointer] = make([]eventbus.EventHandler, 0, 1)
+	subs := make([]*subscription, 0, len(c.subscriptions))
+	for _, s := range c.subscriptions {
+		if s == sub {
+			found = true
+		} else {
+			subs = append(subs, s)
+		}
 	}
+	c.subscriptions = subs
 
-	c.handlers[pointer] = append(c.handlers[pointer], handler)
-
-	return len(c.handlers[pointer])
+	return found, len(c.subscriptions) == 0
 }
 
-// 移除处理器
-func (c *consumer) delHandler(handler eventbus.EventHandler) int {
-	pointer := reflect.ValueOf(handler).Pointer()
+// startBroadcastConsumer starts consuming in broadcast mode.
+func (c *consumer) startBroadcastConsumer(consumer sarama.Consumer, partitions []int32, topic string) {
+	c.consumer = consumer
 
-	c.rw.Lock()
-	defer c.rw.Unlock()
-
-	delete(c.handlers, pointer)
-
-	return len(c.handlers)
+	for _, partition := range partitions {
+		c.wg.Add(1)
+		go c.runPartitionConsumer(topic, partition)
+	}
 }
 
-// 分发数据
+// runPartitionConsumer runs the consume loop of a single partition with retries.
+func (c *consumer) runPartitionConsumer(topic string, partition int32) {
+	defer c.wg.Done()
+
+	backoff := time.Millisecond * 100
+	maxBackoff := time.Second * 10
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+			pc, err := c.consumer.ConsumePartition(topic, partition, sarama.OffsetNewest)
+			if err != nil {
+				log.Errorf("kafka partition consumer create error, partition: %d, error: %v", partition, err)
+
+				select {
+				case <-c.ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+
+				continue
+			}
+
+		LOOP:
+			for {
+				select {
+				case <-c.ctx.Done():
+					pc.AsyncClose()
+					return
+				case msg, ok := <-pc.Messages():
+					if !ok {
+						pc.AsyncClose()
+						break LOOP
+					}
+
+					backoff = time.Millisecond * 100
+					c.dispatch(msg.Value)
+				case err, ok := <-pc.Errors():
+					if !ok {
+						pc.AsyncClose()
+						break LOOP
+					}
+
+					log.Errorf("kafka partition consumer error, partition: %d, error: %v", partition, err)
+					pc.AsyncClose()
+
+					select {
+					case <-c.ctx.Done():
+						return
+					case <-time.After(backoff):
+					}
+
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+
+					break LOOP
+				}
+			}
+		}
+	}
+}
+
+// startGroupConsumer starts consuming in consumer group mode.
+func (c *consumer) startGroupConsumer(group sarama.ConsumerGroup, topic string) {
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+
+		backoff := time.Millisecond * 100
+		maxBackoff := time.Second * 10
+
+		for {
+			select {
+			case <-c.ctx.Done():
+				return
+			default:
+				if err := group.Consume(c.ctx, []string{topic}, c); err != nil {
+					if err == sarama.ErrClosedConsumerGroup {
+						return
+					}
+					log.Errorf("kafka consumer group consume error: %v", err)
+
+					select {
+					case <-c.ctx.Done():
+						return
+					case <-time.After(backoff):
+					}
+
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				} else {
+					backoff = time.Millisecond * 100
+				}
+			}
+		}
+	}()
+}
+
+// Setup implements sarama.ConsumerGroupHandler.
+func (c *consumer) Setup(sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+// Cleanup implements sarama.ConsumerGroupHandler.
+func (c *consumer) Cleanup(sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+// ConsumeClaim implements sarama.ConsumerGroupHandler.
+func (c *consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		c.dispatch(msg.Value)
+
+		session.MarkMessage(msg, "")
+	}
+	return nil
+}
+
+// stop stops consuming.
+func (c *consumer) stop() {
+	c.cancel()
+	c.wg.Wait()
+}
+
+// dispatch dispatches event data.
 func (c *consumer) dispatch(data []byte) {
-	event, err := deserialize(data)
+	event, err := c.eb.deserialize(data)
 	if err != nil {
-		log.Error("invalid event data")
+		log.Errorf("invalid event data: %v", err)
 		return
 	}
 
+	if c.eb.opts.staleDuration > 0 && xtime.Now().Sub(event.Timestamp) > c.eb.opts.staleDuration {
+		log.Debugf("skip stale event, id: %s, topic: %s, timestamp: %v", event.ID, event.Topic, event.Timestamp)
+		return
+	}
+
+	for _, handler := range c.loadHandlers() {
+		xcall.Call(func() {
+			handler(event)
+		})
+	}
+}
+
+// loadHandlers loads the event handlers of the subscriptions.
+func (c *consumer) loadHandlers() []eventbus.EventHandler {
 	c.rw.RLock()
 	defer c.rw.RUnlock()
 
-	for _, handlers := range c.handlers {
-		for i := range handlers {
-			handler := handlers[i]
-			task.AddTask(func() { handler(event) })
+	if len(c.subscriptions) == 0 {
+		return nil
+	}
+
+	if c.balance {
+		idx := atomic.AddUint64(&c.idx, 1) % uint64(len(c.subscriptions))
+		handler := c.subscriptions[idx].handler
+
+		if handler == nil {
+			return nil
 		}
+
+		return []eventbus.EventHandler{handler}
+	} else {
+		handlers := make([]eventbus.EventHandler, 0, len(c.subscriptions))
+
+		for _, sub := range c.subscriptions {
+			if sub.handler != nil {
+				handlers = append(handlers, sub.handler)
+			}
+		}
+
+		return handlers
 	}
 }

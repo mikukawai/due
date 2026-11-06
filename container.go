@@ -2,10 +2,12 @@ package due
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,67 +19,79 @@ import (
 	"github.com/dobyte/due/v2/eventbus"
 	"github.com/dobyte/due/v2/lock"
 	"github.com/dobyte/due/v2/log"
+	"github.com/dobyte/due/v2/mode"
 	"github.com/dobyte/due/v2/task"
 	"github.com/dobyte/due/v2/utils/xcall"
 	"github.com/dobyte/due/v2/utils/xos"
+	"github.com/dobyte/due/v2/utils/xtime"
 )
 
 const (
-	defaultPIDKey                 = "etc.pid"                 // 进程文件路径
-	defaultShutdownMaxWaitTimeKey = "etc.shutdownMaxWaitTime" // 容器关闭最大等待时间
+	defaultPIDKey                 = "etc.pid"                 // PID file path
+	defaultShutdownMaxWaitTimeKey = "etc.shutdownMaxWaitTime" // Maximum wait time for container shutdown
 )
 
 type Container struct {
 	components []component.Component
 }
 
-// NewContainer 创建一个容器
+// NewContainer returns a new container.
 func NewContainer() *Container {
 	return &Container{}
 }
 
-// Add 添加组件
+// Add appends the given components to the container.
 func (c *Container) Add(components ...component.Component) {
 	c.components = append(c.components, components...)
 }
 
-// Serve 启动容器
-func (c *Container) Serve(once ...bool) {
-	c.doSaveProcessID()
+// Serve starts the container.
+//
+// It initializes and starts every component in order, waits for a system signal, then closes and
+// destroys the components and finally cleans up the related modules. When isNonWaitSignal is true,
+// the container skips waiting for the system signal and enters the shutdown flow right after
+// startup.
+func (c *Container) Serve(isNonWaitSignal ...bool) {
+	c.printFrameworkInfo()
 
-	c.doPrintFrameworkInfo()
+	c.initAllComponents()
 
-	c.doInitComponents()
+	c.startAllComponents()
 
-	c.doStartComponents()
+	c.savePidToFile()
 
-	if len(once) == 0 || !once[0] {
-		c.doWaitSystemSignal()
+	if len(isNonWaitSignal) == 0 || !isNonWaitSignal[0] {
+		c.waitSystemSignal()
 	}
 
-	c.doCloseComponents()
+	c.closeAllComponents()
 
-	c.doDestroyComponents()
+	c.destroyAllComponents()
 
-	c.doClearModules()
+	c.deletePidFile()
+
+	c.clearAllModules()
 }
 
-// 初始化所有组件
-func (c *Container) doInitComponents() {
+// initAllComponents initializes every component.
+func (c *Container) initAllComponents() {
 	for _, comp := range c.components {
 		comp.Init()
 	}
 }
 
-// 启动所有组件
-func (c *Container) doStartComponents() {
+// startAllComponents starts every component.
+func (c *Container) startAllComponents() {
 	for _, comp := range c.components {
 		comp.Start()
 	}
 }
 
-// 关闭所有组件
-func (c *Container) doCloseComponents() {
+// closeAllComponents closes every component.
+//
+// All components are closed concurrently in separate goroutines, bounded overall by the
+// etc.shutdownMaxWaitTime timeout.
+func (c *Container) closeAllComponents() {
 	g := xcall.NewGoroutines()
 
 	for _, comp := range c.components {
@@ -87,8 +101,11 @@ func (c *Container) doCloseComponents() {
 	g.Run(context.Background(), etc.Get(defaultShutdownMaxWaitTimeKey).Duration())
 }
 
-// 销毁所有组件
-func (c *Container) doDestroyComponents() {
+// destroyAllComponents destroys every component.
+//
+// All components are destroyed concurrently in separate goroutines, bounded overall by a
+// five-second timeout.
+func (c *Container) destroyAllComponents() {
 	g := xcall.NewGoroutines()
 
 	for _, comp := range c.components {
@@ -98,15 +115,17 @@ func (c *Container) doDestroyComponents() {
 	g.Run(context.Background(), 5*time.Second)
 }
 
-// 等待系统信号
-func (c *Container) doWaitSystemSignal() {
-	sig := make(chan os.Signal)
+// waitSystemSignal waits for a system signal.
+//
+// It blocks until a process-exit signal arrives, then stops listening and logs the signal.
+func (c *Container) waitSystemSignal() {
+	sig := make(chan os.Signal, 1)
 
 	switch runtime.GOOS {
 	case `windows`:
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGKILL, syscall.SIGTERM)
+		signal.Notify(sig, os.Interrupt)
 	default:
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGABRT, syscall.SIGKILL, syscall.SIGTERM)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGABRT, syscall.SIGTERM)
 	}
 
 	s := <-sig
@@ -116,8 +135,8 @@ func (c *Container) doWaitSystemSignal() {
 	log.Warnf("process got signal %v, container will close", s)
 }
 
-// 清理所有模块
-func (c *Container) doClearModules() {
+// clearAllModules cleans up every module.
+func (c *Container) clearAllModules() {
 	if err := eventbus.Close(); err != nil {
 		log.Warnf("eventbus close failed: %v", err)
 	}
@@ -139,8 +158,8 @@ func (c *Container) doClearModules() {
 	log.Close()
 }
 
-// 保存进程号
-func (c *Container) doSaveProcessID() {
+// savePidToFile writes the process ID to the configured file.
+func (c *Container) savePidToFile() {
 	filename := etc.Get(defaultPIDKey).String()
 	if filename == "" {
 		return
@@ -151,9 +170,32 @@ func (c *Container) doSaveProcessID() {
 	}
 }
 
-// 打印框架信息
-func (c *Container) doPrintFrameworkInfo() {
-	info.PrintFrameworkInfo()
+// deletePidFile removes the process ID file.
+func (c *Container) deletePidFile() {
+	filename := etc.Get(defaultPIDKey).String()
+	if filename == "" {
+		return
+	}
 
-	info.PrintGlobalInfo()
+	if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
+		log.Warnf("pid file remove failed: %v", err)
+	}
+}
+
+// printFrameworkInfo prints the framework information.
+func (c *Container) printFrameworkInfo() {
+	fmt.Println(strings.TrimSuffix(strings.TrimPrefix(logo, "\n"), "\n"))
+
+	info.Print("",
+		fmt.Sprintf("[Website] %s", Website),
+		fmt.Sprintf("[Version] %s", Version),
+	)
+
+	info.Print("",
+		fmt.Sprintf("OS: %s %s", runtime.GOOS, runtime.GOARCH),
+		fmt.Sprintf("Go: %s", "v"+strings.TrimPrefix(runtime.Version(), "go")),
+		fmt.Sprintf("PID: %d", os.Getpid()),
+		fmt.Sprintf("Mode: %s", mode.GetMode()),
+		fmt.Sprintf("Time: %s", xtime.Now()),
+	)
 }

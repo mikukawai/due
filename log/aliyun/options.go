@@ -1,10 +1,3 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/9/9 11:31 上午
- * @Desc: TODO
- */
-
 package aliyun
 
 import (
@@ -21,16 +14,17 @@ const (
 	aliyunSourceKey          = "etc.log.aliyun.source"
 )
 
+// Option configures the syncer.
 type Option func(o *options)
 
 type options struct {
-	endpoint        string // 阿里云SLS服务域名，公网使用公网域名，内网使用私网域名
-	accessKeyID     string // 阿里云SLS访问密钥ID
-	accessKeySecret string // 阿里云SLS访问密钥密码
-	project         string // 阿里云SLS项目名称
-	logstore        string // 阿里云SLS日志存储
-	topic           string // 主题标签，默认为空
-	source          string // 来源标签，默认为空
+	endpoint        string // Aliyun SLS service endpoint; use the public domain over the internet and the private domain within a VPC
+	accessKeyID     string // Aliyun SLS access key ID
+	accessKeySecret string // Aliyun SLS access key secret
+	project         string // Aliyun SLS project name
+	logstore        string // Aliyun SLS logstore
+	topic           string // Topic tag, empty by default
+	source          string // Source tag, empty by default
 }
 
 func defaultOptions() *options {
@@ -45,37 +39,37 @@ func defaultOptions() *options {
 	}
 }
 
-// WithProject 设置项目名称
+// WithProject sets the Aliyun SLS project name.
 func WithProject(project string) Option {
 	return func(o *options) { o.project = project }
 }
 
-// WithLogstore 设置日志存储
+// WithLogstore sets the Aliyun SLS logstore.
 func WithLogstore(logstore string) Option {
 	return func(o *options) { o.logstore = logstore }
 }
 
-// WithEndpoint 设置端口
+// WithEndpoint sets the Aliyun SLS service endpoint.
 func WithEndpoint(endpoint string) Option {
 	return func(o *options) { o.endpoint = endpoint }
 }
 
-// WithAccessKeyID 设置访问密钥ID
+// WithAccessKeyID sets the Aliyun SLS access key ID.
 func WithAccessKeyID(accessKeyID string) Option {
 	return func(o *options) { o.accessKeyID = accessKeyID }
 }
 
-// WithAccessKeySecret 设置访问密钥密码
+// WithAccessKeySecret sets the Aliyun SLS access key secret.
 func WithAccessKeySecret(accessKeySecret string) Option {
 	return func(o *options) { o.accessKeySecret = accessKeySecret }
 }
 
-// WithTopic 设置主题标签
+// WithTopic sets the topic tag.
 func WithTopic(topic string) Option {
 	return func(o *options) { o.topic = topic }
 }
 
-// WithSource 设置来源标签
+// WithSource sets the source tag.
 func WithSource(source string) Option {
 	return func(o *options) { o.source = source }
 }

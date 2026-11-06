@@ -2,7 +2,11 @@ package client
 
 import (
 	"context"
+	"slices"
 
+	"github.com/dobyte/due/v2/core/security/aead"
+	"github.com/dobyte/due/v2/core/security/aead/aesgcm"
+	"github.com/dobyte/due/v2/core/security/aead/chacha20poly1305"
 	"github.com/dobyte/due/v2/crypto"
 	"github.com/dobyte/due/v2/encoding"
 	"github.com/dobyte/due/v2/etc"
@@ -12,8 +16,8 @@ import (
 )
 
 const (
-	defaultName  = "client" // 默认客户端名称
-	defaultCodec = "proto"  // 默认编解码器名称
+	defaultName  = "client" // default client name
+	defaultCodec = "proto"  // default codec name
 )
 
 const (
@@ -22,17 +26,22 @@ const (
 	defaultCodecKey = "etc.cluster.client.codec"
 )
 
+// Option is a client option.
 type Option func(o *options)
 
+// options are the client options.
 type options struct {
-	id        string           // 实例ID
-	name      string           // 实例名称
-	ctx       context.Context  // 上下文
-	codec     encoding.Codec   // 编解码器
-	client    network.Client   // 网络客户端
-	encryptor crypto.Encryptor // 消息加密器
+	id        string           // instance ID
+	name      string           // instance name
+	ctx       context.Context  // context
+	codec     encoding.Codec   // codec
+	client    network.Client   // network client
+	encryptor crypto.Encryptor // message encryptor
+	security  *securityOptions // session security options
 }
 
+// defaultOptions returns the default options. Options are read from the configuration center,
+// falling back to the built-in defaults when they are absent.
 func defaultOptions() *options {
 	opts := &options{}
 	opts.ctx = context.Background()
@@ -58,7 +67,7 @@ func defaultOptions() *options {
 	return opts
 }
 
-// WithID 设置实例ID
+// WithID sets the instance ID.
 func WithID(id string) Option {
 	return func(o *options) {
 		if id != "" {
@@ -69,7 +78,7 @@ func WithID(id string) Option {
 	}
 }
 
-// WithName 设置实例名称
+// WithName sets the instance name.
 func WithName(name string) Option {
 	return func(o *options) {
 		if name != "" {
@@ -80,7 +89,7 @@ func WithName(name string) Option {
 	}
 }
 
-// WithCodec 设置编解码器
+// WithCodec sets the codec.
 func WithCodec(codec encoding.Codec) Option {
 	return func(o *options) {
 		if codec != nil {
@@ -91,7 +100,7 @@ func WithCodec(codec encoding.Codec) Option {
 	}
 }
 
-// WithClient 设置客户端
+// WithClient sets the network client.
 func WithClient(client network.Client) Option {
 	return func(o *options) {
 		if client != nil {
@@ -102,7 +111,7 @@ func WithClient(client network.Client) Option {
 	}
 }
 
-// WithContext 设置上下文
+// WithContext sets the context.
 func WithContext(ctx context.Context) Option {
 	return func(o *options) {
 		if ctx != nil {
@@ -113,7 +122,7 @@ func WithContext(ctx context.Context) Option {
 	}
 }
 
-// WithEncryptor 设置消息加密器
+// WithEncryptor sets the message encryptor.
 func WithEncryptor(encryptor crypto.Encryptor) Option {
 	return func(o *options) {
 		if encryptor != nil {
@@ -124,19 +133,44 @@ func WithEncryptor(encryptor crypto.Encryptor) Option {
 	}
 }
 
-type DialOption func(o *dialOptions)
+// WithSessionSecurity enables the session security between the client and the gate.
+//
+// verifier verifies the signature of the gate, and it is usually built from the pinned gate public
+// key. When no suite is given, the handshake defaults are used. When enabled, the payload is sealed
+// with the negotiated session key, so the static encryptor is not applied.
+func WithSessionSecurity(signer crypto.Signer, suites ...aead.Suite) Option {
+	suites = slices.Clone(suites)
 
-type dialOptions struct {
-	addr  string
-	attrs map[string]any
+	return func(o *options) {
+		if signer == nil {
+			log.Warnf("the specified signer is nil and will be automatically ignored")
+			return
+		}
+
+		configured := suites
+		if len(configured) == 0 {
+			configured = []aead.Suite{aesgcm.Suite, chacha20poly1305.Suite}
+		}
+
+		o.security = &securityOptions{signer: signer, suites: slices.Clone(configured)}
+	}
 }
 
-// WithDialAddr 设置拨号地址
+// DialOption is a dial option.
+type DialOption func(o *dialOptions)
+
+// dialOptions are the dial options.
+type dialOptions struct {
+	addr  string         // dial address
+	attrs map[string]any // connection attributes
+}
+
+// WithDialAddr sets the dial address.
 func WithDialAddr(addr string) DialOption {
 	return func(o *dialOptions) { o.addr = addr }
 }
 
-// WithConnAttr 设置连接属性
+// WithConnAttr sets a connection attribute.
 func WithConnAttr(key string, value any) DialOption {
 	return func(o *dialOptions) { o.attrs[key] = value }
 }

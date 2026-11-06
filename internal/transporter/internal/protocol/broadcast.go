@@ -2,84 +2,64 @@ package protocol
 
 import (
 	"encoding/binary"
-	"io"
 
+	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/internal/transporter/internal/codes"
+	"github.com/dobyte/due/v2/internal/transporter/internal/def"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
-	"github.com/dobyte/due/v2/session"
 )
 
 const (
-	broadcastReqBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + b8
-	broadcastResBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + defaultCodeBytes + b64
+	broadcastReqBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.B8 + def.B8
+	broadcastResBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.CodeBytes + def.B64
 )
 
-// EncodeBroadcastReq 编码广播请求
-// 协议：size + header + route + seq + session kind + <message packet>
-func EncodeBroadcastReq(seq uint64, kind session.Kind, disconnect bool, message buffer.Buffer) *buffer.NocopyBuffer {
+// EncodeBroadcastReq encodes a broadcast request.
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {session kind + disconnect + <message packet>}
+func EncodeBroadcastReq(seq uint64, kind cluster.Session, disconnect bool, message buffer.Buffer) *buffer.NocopyBuffer {
 	writer := buffer.MallocWriter(broadcastReqBytes)
-	writer.WriteUint32s(binary.BigEndian, uint32(broadcastReqBytes-defaultSizeBytes+message.Len()))
-	if disconnect {
-		writer.WriteUint8s(dataBit | disconnectBit)
-	} else {
-		writer.WriteUint8s(dataBit)
-	}
+	writer.WriteUint32s(binary.BigEndian, uint32(broadcastReqBytes-def.SizeBytes+message.Len()))
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Broadcast)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint8s(uint8(kind))
+	writer.WriteBools(disconnect)
 
 	return buffer.NewNocopyBuffer(writer, message)
 }
 
-// DecodeBroadcastReq 解码广播请求
-// 协议：size + header + route + seq + session kind + <message packet>
-func DecodeBroadcastReq(data []byte) (seq uint64, kind session.Kind, disconnect bool, message []byte, err error) {
-	reader := buffer.NewReader(data)
-
-	if _, err = reader.Seek(defaultSizeBytes, io.SeekStart); err != nil {
-		return
+// DecodeBroadcastReq decodes a broadcast request.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {session kind + disconnect + <message packet>}
+func DecodeBroadcastReq(req *buffer.Bytes) (cluster.Session, bool, *buffer.Bytes, error) {
+	if req.Len() < def.B8+def.B8 {
+		return 0, false, nil, errors.ErrInvalidMessage
 	}
 
-	var k uint8
+	data := req.Bytes()
+	kind := cluster.Session(data[0])
+	disconnect := data[def.B8] == 1
 
-	if k, err = reader.ReadUint8(); err != nil {
-		return
-	} else {
-		disconnect = k&disconnectBit == disconnectBit
-	}
+	req.Slide(def.B8 + def.B8)
 
-	if _, err = reader.Seek(defaultRouteBytes, io.SeekCurrent); err != nil {
-		return
-	}
-
-	if seq, err = reader.ReadUint64(binary.BigEndian); err != nil {
-		return
-	}
-
-	if k, err = reader.ReadUint8(); err != nil {
-		return
-	} else {
-		kind = session.Kind(k)
-	}
-
-	message = data[broadcastReqBytes:]
-
-	return
+	return kind, disconnect, req, nil
 }
 
-// EncodeBroadcastRes 编码广播响应
-// 协议：size + header + route + seq + code + [total]
+// EncodeBroadcastRes encodes a broadcast response.
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {code + [total]}
 func EncodeBroadcastRes(seq uint64, code uint16, total ...uint64) *buffer.NocopyBuffer {
-	size := broadcastResBytes - defaultSizeBytes
+	size := broadcastResBytes - def.SizeBytes
 	if code != codes.OK || len(total) == 0 || total[0] == 0 {
-		size -= b64
+		size -= def.B64
 	}
 
 	writer := buffer.MallocWriter(broadcastResBytes)
 	writer.WriteUint32s(binary.BigEndian, uint32(size))
-	writer.WriteUint8s(dataBit)
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Broadcast)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint16s(binary.BigEndian, code)
@@ -91,26 +71,20 @@ func EncodeBroadcastRes(seq uint64, code uint16, total ...uint64) *buffer.Nocopy
 	return buffer.NewNocopyBuffer(writer)
 }
 
-// DecodeBroadcastRes 解码广播响应
-// 协议：size + header + route + seq + code + [total]
-func DecodeBroadcastRes(data []byte) (code uint16, total uint64, err error) {
-	if len(data) != broadcastResBytes && len(data) != broadcastResBytes-b64 {
+// DecodeBroadcastRes decodes a broadcast response.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {code + [total]}
+func DecodeBroadcastRes(buf buffer.Buffer) (code uint16, total uint64, err error) {
+	if buf.Len() != def.CodeBytes && buf.Len() != def.CodeBytes+def.B64 {
 		err = errors.ErrInvalidMessage
 		return
 	}
 
-	reader := buffer.NewReader(data)
+	data := buf.Bytes()
+	code = binary.BigEndian.Uint16(data[:def.CodeBytes])
 
-	if _, err = reader.Seek(defaultSizeBytes+defaultHeaderBytes+defaultRouteBytes+defaultSeqBytes, io.SeekStart); err != nil {
-		return
-	}
-
-	if code, err = reader.ReadUint16(binary.BigEndian); err != nil {
-		return
-	}
-
-	if code == codes.OK && len(data) == broadcastResBytes {
-		total, err = reader.ReadUint64(binary.BigEndian)
+	if code == codes.OK && buf.Len() == def.CodeBytes+def.B64 {
+		total = binary.BigEndian.Uint64(data[def.CodeBytes:])
 	}
 
 	return

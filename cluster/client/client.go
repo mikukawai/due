@@ -3,40 +3,57 @@ package client
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 
 	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/component"
+	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/core/info"
+	"github.com/dobyte/due/v2/core/security/handshake"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/log"
+	"github.com/dobyte/due/v2/mode"
 	"github.com/dobyte/due/v2/network"
 	"github.com/dobyte/due/v2/packet"
 	"github.com/dobyte/due/v2/utils/xcall"
 )
 
+// HookHandler is the hook handler of the client.
 type HookHandler func(proxy *Proxy)
 
+// RouteHandler is the route handler of the client.
+//
+// The Context is valid only for the duration of the call and must not be retained after the handler
+// returns.
 type RouteHandler func(ctx *Context)
 
+// EventHandler is the event handler of the client.
 type EventHandler func(conn *Conn)
 
+// Client is the client component.
+//
+// It dials connections to the server and provides registration of routes, events and hooks as
+// well as message sending and receiving.
 type Client struct {
 	component.Base
-	opts                *options
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	routes              map[int32][]RouteHandler
-	events              map[cluster.Event][]EventHandler
-	defaultRouteHandler RouteHandler
-	proxy               *Proxy
-	state               int32
-	conns               sync.Map
-	rw                  sync.RWMutex
-	hooks               map[cluster.Hook][]HookHandler
+	opts                *options           // options
+	ctx                 context.Context    // context
+	cancel              context.CancelFunc // cancel function
+	proxy               *Proxy             // client proxy
+	state               atomic.Int32       // client state
+	rw1                 sync.Mutex         // registration lock, guards concurrent registration of routes, events and hooks
+	hooks               atomic.Value       // hook handlers (map[cluster.Hook][]HookHandler)
+	routes              atomic.Value       // route handlers (map[int32][]RouteHandler)
+	events              atomic.Value       // event handlers (map[cluster.Event][]EventHandler)
+	defaultRouteHandler atomic.Value       // default route handler (RouteHandler)
+	ctxPool             *sync.Pool         // route context pool
+	rw2                 sync.RWMutex       // connection lock, guards concurrent access to the connection table
+	conns               sync.Map           // connection table (network.Conn -> *Conn)
 }
 
+// NewClient returns a new client component configured by the given options.
 func NewClient(opts ...Option) *Client {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -46,21 +63,26 @@ func NewClient(opts ...Option) *Client {
 	c := &Client{}
 	c.opts = o
 	c.proxy = newProxy(c)
-	c.routes = make(map[int32][]RouteHandler)
-	c.events = make(map[cluster.Event][]EventHandler)
-	c.hooks = make(map[cluster.Hook][]HookHandler)
+	c.hooks.Store(make(map[cluster.Hook][]HookHandler))
+	c.routes.Store(make(map[int32][]RouteHandler))
+	c.events.Store(make(map[cluster.Event][]EventHandler))
+	c.defaultRouteHandler.Store(RouteHandler(nil))
+	c.ctxPool = &sync.Pool{New: func() any { return &Context{} }}
 	c.ctx, c.cancel = context.WithCancel(o.ctx)
-	c.state = int32(cluster.Shut)
+	c.state.Store(int32(cluster.Shut))
 
 	return c
 }
 
-// Name 组件名称
+// Name returns the client name.
 func (c *Client) Name() string {
 	return c.opts.name
 }
 
-// Init 初始化节点
+// Init initializes the client.
+//
+// It validates required configuration such as the network client and codec, terminating the
+// process when they are missing, and then triggers the Init hook.
 func (c *Client) Init() {
 	if c.opts.client == nil {
 		log.Fatal("client plugin is not injected")
@@ -73,89 +95,194 @@ func (c *Client) Init() {
 	c.runHookFunc(cluster.Init)
 }
 
-// Start 启动组件
+// Start starts the component.
 func (c *Client) Start() {
-	c.setState(cluster.Work)
+	c.rw1.Lock()
+
+	if !c.state.CompareAndSwap(int32(cluster.Shut), int32(cluster.Work)) {
+		c.rw1.Unlock()
+		return
+	}
 
 	c.opts.client.OnDisconnect(c.handleDisconnect)
 	c.opts.client.OnReceive(c.handleReceive)
+	c.opts.client.OnHandshake(c.handleHandshake)
+
+	c.rw1.Unlock()
 
 	c.printInfo()
 
 	c.runHookFunc(cluster.Start)
 }
 
-// Destroy 销毁组件
+// Close closes the client.
+func (c *Client) Close() {
+	if !c.state.CompareAndSwap(int32(cluster.Work), int32(cluster.Hang)) {
+		if !c.state.CompareAndSwap(int32(cluster.Busy), int32(cluster.Hang)) {
+			return
+		}
+	}
+
+	c.runHookFunc(cluster.Close)
+}
+
+// Destroy destroys the client.
+//
+// It marks the client as shut, closes every connection and triggers the Destroy hook.
 func (c *Client) Destroy() {
-	c.setState(cluster.Shut)
+	if !c.state.CompareAndSwap(int32(cluster.Hang), int32(cluster.Shut)) {
+		return
+	}
+
+	c.cancel()
+
+	conns := make([]*Conn, 0)
+
+	c.rw2.Lock()
+	c.conns.Range(func(_, conn any) bool {
+		conns = append(conns, conn.(*Conn))
+		return true
+	})
+	c.conns.Clear()
+	c.rw2.Unlock()
+
+	for _, cc := range conns {
+		cc.Close()
+	}
 
 	c.runHookFunc(cluster.Destroy)
 }
 
-// Proxy 获取节点代理
+// Proxy returns the client proxy.
 func (c *Client) Proxy() *Proxy {
 	return c.proxy
 }
 
-// 处理断开连接
+// handleDisconnect handles a closed connection. It removes the connection from the connection
+// table and triggers the disconnect event.
 func (c *Client) handleDisconnect(conn network.Conn) {
 	val, ok := c.conns.Load(conn)
 	if !ok {
 		return
 	}
 
+	cc := val.(*Conn)
+	connected := cc.signalClosed()
 	c.conns.Delete(conn)
 
-	handlers, ok := c.events[cluster.Disconnect]
-	if !ok {
-		return
-	}
-
-	for _, handler := range handlers {
-		xcall.Call(func() {
-			handler(val.(*Conn))
-		})
+	if handlers, ok := c.events.Load().(map[cluster.Event][]EventHandler)[cluster.Disconnect]; connected && ok {
+		for _, handler := range handlers {
+			safeCallEventHandler(handler, cc)
+		}
 	}
 }
 
-// 处理接收到的消息
-func (c *Client) handleReceive(conn network.Conn, data []byte) {
+// handleReceive handles a received message. It unpacks the message and dispatches it to the
+// matching route handler, falling back to the default route handler when the route is not
+// registered.
+func (c *Client) handleReceive(conn network.Conn, buf buffer.Buffer) {
 	val, ok := c.conns.Load(conn)
 	if !ok {
+		buf.Release()
 		return
 	}
 
-	message, err := packet.UnpackMessage(data)
+	cc := val.(*Conn)
+
+	route, seq, data, err := packet.UnpackMessage(buf)
 	if err != nil {
+		buf.Release()
 		log.Errorf("unpack message failed: %v", err)
 		return
 	}
 
-	handlers, ok := c.routes[message.Route]
-	if ok {
-		for _, handler := range handlers {
-			xcall.Call(func() {
-				handler(&Context{
-					ctx:     context.Background(),
-					conn:    val.(*Conn),
-					message: message,
-				})
-			})
+	// Decrypt once when session security is enabled, so that Parse is idempotent and every
+	// handler registered for the route shares the same plaintext.
+	if c.opts.security != nil {
+		session := cc.security.Load()
+		if session == nil {
+			buf.Release()
+			log.Errorf("session security is not established")
+			return
 		}
-	} else if c.defaultRouteHandler != nil {
-		c.defaultRouteHandler(&Context{
-			ctx:     context.Background(),
-			conn:    val.(*Conn),
-			message: message,
-		})
-	} else {
-		log.Debugf("route handler is not registered, route: %v", message.Route)
+
+		payload := data.Bytes()
+		output := buffer.MallocBytes(max(1, len(payload)))
+		plaintext, err := session.OpenMessage(output.Bytes()[:0], payload, handshake.ServerToClient, route, seq)
+		if err != nil {
+			output.Release()
+			buf.Release()
+			log.Errorf("open secure message failed, route: %d, seq: %d, err: %v", route, seq, err)
+			return
+		}
+
+		buf.Release()
+		output.Truncate(len(plaintext))
+		buf = output
+		data = buf
 	}
+
+	handlers, registered := c.routes.Load().(map[int32][]RouteHandler)[route]
+	switch {
+	case registered && len(handlers) > 0:
+		ctx := c.acquireContext(cc, route, seq, data)
+		for _, handler := range handlers {
+			safeCallRouteHandler(handler, ctx)
+		}
+		c.releaseContext(ctx)
+	case !registered:
+		if handler := c.defaultRouteHandler.Load().(RouteHandler); handler != nil {
+			ctx := c.acquireContext(cc, route, seq, data)
+			safeCallRouteHandler(handler, ctx)
+			c.releaseContext(ctx)
+		} else if mode.IsDebugMode() {
+			log.Debugf("route handler is not registered, route: %v", route)
+		}
+	}
+
+	buf.Release()
 }
 
-// 拨号
+// acquireContext obtains a route context from the pool and initializes it.
+func (c *Client) acquireContext(conn *Conn, route, seq int32, buf buffer.Buffer) *Context {
+	ctx := c.ctxPool.Get().(*Context)
+	ctx.ctx = context.Background()
+	ctx.conn = conn
+	ctx.route = route
+	ctx.seq = seq
+	ctx.buf = buf
+	return ctx
+}
+
+// releaseContext clears and recycles a route context.
+func (c *Client) releaseContext(ctx *Context) {
+	ctx.reset()
+	c.ctxPool.Put(ctx)
+}
+
+// handleHandshake handles a received handshake frame and hands it to the pending handshake of the
+// connection.
+func (c *Client) handleHandshake(conn network.Conn, buf buffer.Buffer) {
+	val, ok := c.conns.Load(conn)
+	if !ok {
+		buf.Release()
+		return
+	}
+
+	payload, err := packet.ExtractHandshake(buf)
+	if err != nil {
+		buf.Release()
+		log.Errorf("extract handshake frame failed: %v", err)
+		return
+	}
+
+	val.(*Conn).deliverHandshake(payload)
+	buf.Release()
+}
+
+// dial dials a connection to the server.
 func (c *Client) dial(opts ...DialOption) (*Conn, error) {
-	if c.getState() == cluster.Shut {
+	if st := c.getState(); st != cluster.Work && st != cluster.Busy {
 		return nil, errors.ErrClientShut
 	}
 
@@ -169,114 +296,168 @@ func (c *Client) dial(opts ...DialOption) (*Conn, error) {
 		return nil, err
 	}
 
-	cc := &Conn{conn: conn, client: c}
+	cc := &Conn{conn: conn, client: c, closedCh: make(chan struct{})}
+
+	if c.opts.security != nil {
+		cc.handshakeCh = make(chan []byte, 1)
+	}
 
 	for key, value := range o.attrs {
 		cc.SetAttr(key, value)
 	}
 
+	c.rw2.Lock()
+	if st := c.getState(); st != cluster.Work && st != cluster.Busy {
+		c.rw2.Unlock()
+		conn.Close()
+		return nil, errors.ErrClientShut
+	}
 	c.conns.Store(conn, cc)
+	c.rw2.Unlock()
 
-	if handlers, ok := c.events[cluster.Connect]; ok {
-		for _, handler := range handlers {
-			xcall.Call(func() {
-				handler(cc)
-			})
+	if c.opts.security != nil {
+		if err = cc.handshake(); err != nil {
+			c.rw2.Lock()
+			c.conns.Delete(conn)
+			c.rw2.Unlock()
+			_ = conn.Close()
+			return nil, err
 		}
+	}
+
+	if handlers, ok := c.events.Load().(map[cluster.Event][]EventHandler)[cluster.Connect]; ok {
+		for _, handler := range handlers {
+			safeCallEventHandler(handler, cc)
+		}
+	}
+	if !cc.markConnected() {
+		if handlers, ok := c.events.Load().(map[cluster.Event][]EventHandler)[cluster.Disconnect]; ok {
+			for _, handler := range handlers {
+				safeCallEventHandler(handler, cc)
+			}
+		}
+		return nil, errors.ErrConnectionClosed
 	}
 
 	return cc, nil
 }
 
-// 添加路由处理器
-func (c *Client) addRouteHandler(route int32, handler RouteHandler) {
-	if c.getState() == cluster.Shut {
-		c.routes[route] = append(c.routes[route], handler)
-	} else {
-		log.Warnf("client is working, can't add route handler")
-	}
-}
-
-// 默认路由处理器
-func (c *Client) setDefaultRouteHandler(handler RouteHandler) {
-	if c.getState() == cluster.Shut {
-		c.defaultRouteHandler = handler
-	} else {
-		log.Warnf("client is working, can't set default route handler")
-	}
-}
-
-// 添加事件处理器
+// addEventListener adds an event handler for the given event.
 func (c *Client) addEventListener(event cluster.Event, handler EventHandler) {
-	if c.getState() == cluster.Shut {
-		c.events[event] = append(c.events[event], handler)
-	} else {
+	c.rw1.Lock()
+	defer c.rw1.Unlock()
+
+	if c.getState() != cluster.Shut {
 		log.Warnf("client is working, can't add event handler")
+		return
 	}
+
+	oldEvents := c.events.Load().(map[cluster.Event][]EventHandler)
+	newEvents := maps.Clone(oldEvents)
+	newEvents[event] = append(newEvents[event], handler)
+
+	c.events.Store(newEvents)
 }
 
-// 添加钩子监听器
+// addRouteHandler adds a route handler for the given route.
+func (c *Client) addRouteHandler(route int32, handler RouteHandler) {
+	c.rw1.Lock()
+	defer c.rw1.Unlock()
+
+	if c.getState() != cluster.Shut {
+		log.Warnf("client is working, can't add route handler")
+		return
+	}
+
+	oldRoutes := c.routes.Load().(map[int32][]RouteHandler)
+	newRoutes := maps.Clone(oldRoutes)
+	newRoutes[route] = append(newRoutes[route], handler)
+
+	c.routes.Store(newRoutes)
+}
+
+// setDefaultRouteHandler sets the default route handler that serves every unregistered route. It
+// may be set only once.
+func (c *Client) setDefaultRouteHandler(handler RouteHandler) {
+	c.rw1.Lock()
+	defer c.rw1.Unlock()
+
+	if c.getState() != cluster.Shut {
+		log.Warnf("client is working, can't set default route handler")
+		return
+	}
+
+	if cur := c.defaultRouteHandler.Load().(RouteHandler); cur != nil {
+		log.Warnf("default route handler is already set")
+		return
+	}
+
+	c.defaultRouteHandler.Store(handler)
+}
+
+// addHookListener adds a hook listener for the given hook.
 func (c *Client) addHookListener(hook cluster.Hook, handler HookHandler) {
-	switch hook {
-	case cluster.Destroy:
-		c.rw.Lock()
-		c.hooks[hook] = append(c.hooks[hook], handler)
-		c.rw.Unlock()
-	default:
-		if c.getState() == cluster.Shut {
-			c.hooks[hook] = append(c.hooks[hook], handler)
-		} else {
-			log.Warnf("server is working, can't add hook handler")
-		}
+	c.rw1.Lock()
+	defer c.rw1.Unlock()
+
+	if hook != cluster.Destroy && c.getState() != cluster.Shut {
+		log.Warnf("client is working, can't add hook handler")
+		return
 	}
+
+	oldHooks := c.hooks.Load().(map[cluster.Hook][]HookHandler)
+	newHooks := maps.Clone(oldHooks)
+	newHooks[hook] = append(newHooks[hook], handler)
+
+	c.hooks.Store(newHooks)
 }
 
-// 设置状态
-func (c *Client) setState(state cluster.State) {
-	atomic.StoreInt32(&c.state, int32(state))
-}
-
-// 获取状态
+// getState returns the client state.
 func (c *Client) getState() cluster.State {
-	return cluster.State(atomic.LoadInt32(&c.state))
+	return cluster.State(c.state.Load())
 }
 
-// 执行钩子函数
+// runHookFunc runs every listener of the given hook and waits for all of them to finish.
 func (c *Client) runHookFunc(hook cluster.Hook) {
-	c.rw.RLock()
-
-	if handlers, ok := c.hooks[hook]; ok {
-		wg := &sync.WaitGroup{}
-		wg.Add(len(handlers))
-
-		for i := range handlers {
-			handler := handlers[i]
-			xcall.Go(func() {
-				handler(c.proxy)
-				wg.Done()
-			})
-		}
-
-		c.rw.RUnlock()
-
-		wg.Wait()
-	} else {
-		c.rw.RUnlock()
+	handlers, ok := c.hooks.Load().(map[cluster.Hook][]HookHandler)[hook]
+	if !ok {
+		return
 	}
+
+	wg := &sync.WaitGroup{}
+	wg.Add(len(handlers))
+
+	for i := range handlers {
+		handler := handlers[i]
+		xcall.Go(func() {
+			defer wg.Done()
+
+			handler(c.proxy)
+		})
+	}
+
+	wg.Wait()
 }
 
-// 打印组件信息
+// printInfo prints basic component information such as the client name, codec, protocol and
+// encryptor.
 func (c *Client) printInfo() {
-	infos := make([]string, 0)
-	infos = append(infos, fmt.Sprintf("Name: %s", c.Name()))
-	infos = append(infos, fmt.Sprintf("Codec: %s", c.opts.codec.Name()))
-	infos = append(infos, fmt.Sprintf("Protocol: %s", c.opts.client.Protocol()))
+	rows := make([]string, 0, 4)
+	rows = append(rows, fmt.Sprintf("Name: %s", c.Name()))
+	rows = append(rows, fmt.Sprintf("Codec: %s", c.opts.codec.Name()))
+	rows = append(rows, fmt.Sprintf("Protocol: %s", c.opts.client.Protocol()))
+
+	if c.opts.security != nil {
+		rows = append(rows, "Security: enabled")
+	} else {
+		rows = append(rows, "Security: disabled")
+	}
 
 	if c.opts.encryptor != nil {
-		infos = append(infos, fmt.Sprintf("Encryptor: %s", c.opts.encryptor.Name()))
+		rows = append(rows, fmt.Sprintf("Encryptor: %s", c.opts.encryptor.Name()))
 	} else {
-		infos = append(infos, "Encryptor: -")
+		rows = append(rows, "Encryptor: -")
 	}
 
-	info.PrintBoxInfo("Client", infos...)
+	info.Print("Client", rows...)
 }

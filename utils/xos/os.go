@@ -8,43 +8,49 @@ import (
 	"github.com/dobyte/due/v2/core/stat"
 )
 
-// Stat 获取文件信息
+// Stat returns the file information of filePath.
 func Stat(filePath string) (stat.FileInfo, error) {
 	return stat.Stat(filePath)
 }
 
-// IsDir 是否是目录
+// IsDir reports whether path is a directory.
 func IsDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }
 
-// IsFile 是否是文件
+// IsFile reports whether path is a file.
 func IsFile(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
 
-// Split 将路径分割成目录、文件、文件名、后缀
+// Split splits path into its directory, file name, name without extension and extension.
 func Split(path string) (dir, file, name, ext string) {
 	dir, file = filepath.Split(path)
-	for i := len(file) - 1; i >= 0 && !os.IsPathSeparator(file[i]); i-- {
-		if file[i] == '.' {
-			name = file[:i]
-			ext = file[i+1:]
-			return
-		}
+
+	ext = filepath.Ext(file)
+	if ext == file {
+		// A hidden file that starts with a dot, such as .gitignore, is treated as having no
+		// extension.
+		name = file
+		ext = ""
+		return
+	}
+
+	if ext != "" {
+		name = file[:len(file)-len(ext)]
+		ext = ext[1:] // Strip the leading dot of the extension.
+	} else {
+		name = file
 	}
 	return
 }
 
-// WriteFile 写文件
+// WriteFile writes data to file, creating the parent directory when it does not exist.
 func WriteFile(file string, data []byte) error {
-	path := filepath.Dir(file)
-
-	if !IsDir(path) {
-		err := os.MkdirAll(path, fs.ModePerm)
-		if err != nil {
+	if path := filepath.Dir(file); !IsDir(path) {
+		if err := os.MkdirAll(path, fs.ModePerm); err != nil {
 			return err
 		}
 	}

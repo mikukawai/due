@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
+	"time"
 
 	"github.com/dobyte/due/v2/core/endpoint"
 	"github.com/dobyte/due/v2/core/net"
@@ -11,6 +13,10 @@ import (
 
 const scheme = "rpcx"
 
+const defaultShutdownTimeout = 5 * time.Second
+
+// Server is a microservice server that wraps an rpcx server and exposes generic start, stop and
+// registration capabilities.
 type Server struct {
 	listenAddr string
 	exposeAddr string
@@ -18,6 +24,7 @@ type Server struct {
 	endpoint   *endpoint.Endpoint
 }
 
+// Options holds the server options.
 type Options struct {
 	Addr       string
 	Expose     bool
@@ -26,6 +33,9 @@ type Options struct {
 	ServerOpts []server.OptionFn
 }
 
+// NewServer returns a new microservice server.
+//
+// It parses the listen and expose addresses, and enables the TLS certificate as needed.
 func NewServer(opts *Options) (*Server, error) {
 	listenAddr, exposeAddr, err := net.ParseAddr(opts.Addr, opts.Expose)
 
@@ -54,32 +64,39 @@ func NewServer(opts *Options) (*Server, error) {
 	return s, nil
 }
 
-// Addr 监听地址
+// Addr returns the server listening address.
 func (s *Server) Addr() string {
 	return s.listenAddr
 }
 
-// Scheme 协议
+// Scheme returns the server protocol scheme.
 func (s *Server) Scheme() string {
 	return scheme
 }
 
-// Endpoint 获取服务端口
+// Endpoint returns the service endpoint.
 func (s *Server) Endpoint() *endpoint.Endpoint {
 	return s.endpoint
 }
 
-// Start 启动服务器
+// Start starts the server.
+//
+// It serves rpcx over TCP on the listening address.
 func (s *Server) Start() error {
 	return s.server.Serve("tcp", s.listenAddr)
 }
 
-// Stop 停止服务器
+// Stop stops the server.
 func (s *Server) Stop() error {
-	return s.server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
+	defer cancel()
+
+	return s.server.Shutdown(ctx)
 }
 
-// RegisterService 注册服务
+// RegisterService registers a service.
+//
+// The service descriptor must be a service name in string form.
 func (s *Server) RegisterService(desc, ss any) error {
 	name, ok := desc.(string)
 	if !ok {

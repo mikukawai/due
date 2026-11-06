@@ -18,9 +18,12 @@ import (
 type Cache struct {
 	opts    *options
 	builtin bool
+	closed  atomic.Bool
 	sfg     singleflight.Group
 }
 
+// NewCache returns a new Memcache-backed Cache. The optional opts override the default
+// configuration.
 func NewCache(opts ...Option) *Cache {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -30,56 +33,42 @@ func NewCache(opts ...Option) *Cache {
 	c := &Cache{}
 	c.opts = o
 
-	if o.client == nil {
-		o.client, c.builtin = memcache.New(o.addrs...), true
+	if c.opts.client == nil {
+		c.opts.client, c.builtin = memcache.New(c.opts.addrs...), true
 	}
 
 	return c
 }
 
-// Has 检测缓存是否存在
+// Has reports whether the entry identified by key exists.
 func (c *Cache) Has(ctx context.Context, key string) (bool, error) {
-	key = c.AddPrefix(key)
-
-	val, err, _ := c.sfg.Do(key, func() (any, error) {
-		item, err := c.opts.client.Get(key)
-		if err != nil {
-			return nil, err
-		}
-
-		return xconv.String(item.Value), nil
-	})
-	if err != nil {
-		if errors.Is(err, memcache.ErrCacheMiss) {
-			return false, nil
-		}
+	if err := c.check(); err != nil {
 		return false, err
 	}
 
-	if val.(string) == c.opts.nilValue {
-		return false, nil
+	if item, err := c.opts.client.Get(c.AddPrefix(key)); err != nil {
+		if errors.Is(err, memcache.ErrCacheMiss) {
+			return false, nil
+		} else {
+			return false, err
+		}
+	} else {
+		return xconv.String(item.Value) != c.opts.nilValue, nil
 	}
-
-	return true, nil
 }
 
-// Get 获取缓存值
+// Get returns the value of key. The optional def is returned when the entry does not exist.
 func (c *Cache) Get(ctx context.Context, key string, def ...any) cache.Result {
-	key = c.AddPrefix(key)
+	if err := c.check(); err != nil {
+		return cache.NewResult(nil, err)
+	}
 
-	val, err, _ := c.sfg.Do(key, func() (any, error) {
-		item, err := c.opts.client.Get(key)
-		if err != nil {
-			return nil, err
-		}
-
-		return xconv.String(item.Value), nil
-	})
+	item, err := c.opts.client.Get(c.AddPrefix(key))
 	if err != nil && !errors.Is(err, memcache.ErrCacheMiss) {
 		return cache.NewResult(nil, err)
 	}
 
-	if errors.Is(err, memcache.ErrCacheMiss) || val.(string) == c.opts.nilValue {
+	if errors.Is(err, memcache.ErrCacheMiss) || xconv.String(item.Value) == c.opts.nilValue {
 		if len(def) > 0 {
 			return cache.NewResult(def[0])
 		} else {
@@ -87,50 +76,63 @@ func (c *Cache) Get(ctx context.Context, key string, def ...any) cache.Result {
 		}
 	}
 
-	return cache.NewResult(val)
+	return cache.NewResult(xconv.String(item.Value))
 }
 
-// Set 设置缓存值
+// Set stores value under key. The optional expiration sets the entry's time to live; when it is
+// omitted a random duration within the configured expiration range is used.
 func (c *Cache) Set(ctx context.Context, key string, value any, expiration ...time.Duration) error {
-	if len(expiration) > 0 && expiration[0] > 0 {
-		return c.opts.client.Set(&memcache.Item{
-			Key:        c.AddPrefix(key),
-			Value:      []byte(xconv.String(value)),
-			Expiration: int32(expiration[0].Seconds()),
-		})
-	} else {
-		return c.opts.client.Set(&memcache.Item{
-			Key:   c.AddPrefix(key),
-			Value: []byte(xconv.String(value)),
-		})
+	if err := c.check(); err != nil {
+		return err
 	}
+
+	var ttl int32
+
+	if len(expiration) > 0 {
+		ttl = int32(expiration[0].Seconds())
+	} else {
+		ttl = int32(xrand.Duration(c.opts.minExpiration, c.opts.maxExpiration).Seconds())
+	}
+
+	return c.opts.client.Set(&memcache.Item{
+		Key:        c.AddPrefix(key),
+		Value:      []byte(xconv.String(value)),
+		Expiration: ttl,
+	})
 }
 
-// GetSet 获取设置缓存值
+// GetSet returns the value of key, generating it with fn and storing it when the entry does not
+// exist.
 func (c *Cache) GetSet(ctx context.Context, key string, fn cache.SetValueFunc) cache.Result {
-	key = c.AddPrefix(key)
-
-	val, err, _ := c.sfg.Do(key, func() (any, error) {
-		item, err := c.opts.client.Get(key)
-		if err != nil {
-			return nil, err
-		}
-
-		return xconv.String(item.Value), nil
-	})
-	if err != nil && !errors.Is(err, memcache.ErrCacheMiss) {
+	if err := c.check(); err != nil {
 		return cache.NewResult(nil, err)
 	}
 
-	if err == nil {
+	key = c.AddPrefix(key)
+
+	if item, err := c.opts.client.Get(key); err == nil {
+		val := xconv.String(item.Value)
 		if val == c.opts.nilValue {
 			return cache.NewResult(nil, errors.ErrNil)
 		} else {
 			return cache.NewResult(val)
 		}
+	} else if !errors.Is(err, memcache.ErrCacheMiss) {
+		return cache.NewResult(nil, err)
 	}
 
 	rst, _, _ := c.sfg.Do(key+":set", func() (any, error) {
+		if item, err := c.opts.client.Get(key); err == nil {
+			val := xconv.String(item.Value)
+			if val == c.opts.nilValue {
+				return cache.NewResult(nil, errors.ErrNil), nil
+			} else {
+				return cache.NewResult(val), nil
+			}
+		} else if !errors.Is(err, memcache.ErrCacheMiss) {
+			return cache.NewResult(nil, err), nil
+		}
+
 		val, err := fn()
 		if err != nil {
 			return cache.NewResult(nil, err), nil
@@ -143,30 +145,38 @@ func (c *Cache) GetSet(ctx context.Context, key string, fn cache.SetValueFunc) c
 				Expiration: int32(c.opts.nilExpiration.Seconds()),
 			}); err != nil {
 				return cache.NewResult(nil, err), nil
+			} else {
+				return cache.NewResult(nil, errors.ErrNil), nil
 			}
-			return cache.NewResult(nil, errors.ErrNil), nil
 		}
 
-		expiration := time.Duration(xrand.Int64(int64(c.opts.minExpiration), int64(c.opts.maxExpiration)))
+		ttl := int32(xrand.Duration(c.opts.minExpiration, c.opts.maxExpiration).Seconds())
 
 		if err = c.opts.client.Set(&memcache.Item{
 			Key:        key,
 			Value:      xconv.Bytes(val),
-			Expiration: int32(expiration.Seconds()),
+			Expiration: ttl,
 		}); err != nil {
 			return cache.NewResult(nil, err), nil
+		} else {
+			return cache.NewResult(val, nil), nil
 		}
-
-		return cache.NewResult(val, nil), nil
 	})
 
 	return rst.(cache.Result)
 }
 
-// Delete 删除缓存
+// Delete removes the given keys and reports how many keys were actually deleted.
 func (c *Cache) Delete(ctx context.Context, keys ...string) (int64, error) {
-	total := int64(0)
+	if len(keys) == 0 {
+		return 0, nil
+	}
 
+	if err := c.check(); err != nil {
+		return 0, err
+	}
+
+	total := int64(0)
 	eg, _ := errgroup.WithContext(ctx)
 
 	for _, key := range keys {
@@ -196,97 +206,111 @@ func (c *Cache) Delete(ctx context.Context, keys ...string) (int64, error) {
 	return 0, err
 }
 
-// IncrInt 整数自增
+// IncrInt increments the integer stored at key by value and returns the resulting value.
 func (c *Cache) IncrInt(ctx context.Context, key string, value int64) (int64, error) {
+	if err := c.check(); err != nil {
+		return 0, err
+	}
+
 	if value < 0 {
 		return c.DecrInt(ctx, key, 0-value)
 	}
 
 	key = c.AddPrefix(key)
 
-	newValue, err := c.opts.client.Increment(key, uint64(value))
-	if err != nil {
+	if newValue, err := c.opts.client.Increment(key, uint64(value)); err != nil {
 		if errors.Is(err, memcache.ErrCacheMiss) {
 			if err = c.opts.client.Add(&memcache.Item{
 				Key:   key,
 				Value: xconv.Bytes(xconv.String(value)),
 			}); err != nil {
 				if errors.Is(err, memcache.ErrNotStored) {
-					newValue, err = c.opts.client.Increment(key, uint64(value))
-					if err != nil {
+					if newValue, err = c.opts.client.Increment(key, uint64(value)); err != nil {
 						return 0, err
+					} else {
+						return int64(newValue), nil
 					}
-
-					return int64(newValue), nil
+				} else {
+					return 0, err
 				}
-				return 0, err
 			}
 
 			return value, nil
 		} else {
 			return 0, err
 		}
+	} else {
+		return int64(newValue), nil
 	}
-
-	return int64(newValue), nil
 }
 
-// IncrFloat 浮点数自增，鉴于memcache不支持浮点数，所以这里是通过整数自增来实现的
+// IncrFloat increments the float stored at key by value and returns the resulting value. Since
+// Memcache does not support floats, the increment is implemented through integer increments.
 func (c *Cache) IncrFloat(ctx context.Context, key string, value float64) (float64, error) {
-	newValue, err := c.IncrInt(ctx, key, int64(value))
-	if err != nil {
+	if err := c.check(); err != nil {
 		return 0, err
 	}
 
-	return float64(newValue), nil
+	if newValue, err := c.IncrInt(ctx, key, int64(value)); err != nil {
+		return 0, err
+	} else {
+		return float64(newValue), nil
+	}
 }
 
-// DecrInt 整数自减
+// DecrInt decrements the integer stored at key by value and returns the resulting value.
 func (c *Cache) DecrInt(ctx context.Context, key string, value int64) (int64, error) {
+	if err := c.check(); err != nil {
+		return 0, err
+	}
+
 	if value < 0 {
 		return c.IncrInt(ctx, key, 0-value)
 	}
 
 	key = c.AddPrefix(key)
 
-	newValue, err := c.opts.client.Decrement(key, uint64(value))
-	if err != nil {
+	if newValue, err := c.opts.client.Decrement(key, uint64(value)); err != nil {
 		if errors.Is(err, memcache.ErrCacheMiss) {
 			if err = c.opts.client.Add(&memcache.Item{
 				Key:   key,
 				Value: xconv.Bytes(xconv.String(value)),
 			}); err != nil {
 				if errors.Is(err, memcache.ErrNotStored) {
-					newValue, err = c.opts.client.Decrement(key, uint64(value))
-					if err != nil {
+					if newValue, err = c.opts.client.Decrement(key, uint64(value)); err != nil {
 						return 0, err
+					} else {
+						return int64(newValue), nil
 					}
-
-					return int64(newValue), nil
+				} else {
+					return 0, err
 				}
-				return 0, err
 			}
 
 			return value, nil
 		} else {
 			return 0, err
 		}
+	} else {
+		return int64(newValue), nil
 	}
-
-	return int64(newValue), nil
 }
 
-// DecrFloat 浮点数自减，鉴于memcache不支持浮点数，所以这里是通过整数自减来实现的
+// DecrFloat decrements the float stored at key by value and returns the resulting value. Since
+// Memcache does not support floats, the decrement is implemented through integer decrements.
 func (c *Cache) DecrFloat(ctx context.Context, key string, value float64) (float64, error) {
-	newValue, err := c.DecrInt(ctx, key, int64(value))
-	if err != nil {
+	if err := c.check(); err != nil {
 		return 0, err
 	}
 
-	return float64(newValue), nil
+	if newValue, err := c.DecrInt(ctx, key, int64(value)); err != nil {
+		return 0, err
+	} else {
+		return float64(newValue), nil
+	}
 }
 
-// AddPrefix 添加Key前缀
+// AddPrefix returns key prefixed with the cache's key prefix.
 func (c *Cache) AddPrefix(key string) string {
 	if c.opts.prefix == "" {
 		return key
@@ -295,16 +319,34 @@ func (c *Cache) AddPrefix(key string) string {
 	}
 }
 
-// Client 获取客户端
+// Client returns the underlying Memcache client.
 func (c *Cache) Client() any {
-	return c.opts.client
-}
-
-// Close 关闭客户端
-func (c *Cache) Close() error {
-	if !c.builtin {
+	if err := c.check(); err != nil {
 		return nil
 	}
 
-	return c.opts.client.Close()
+	return c.opts.client
+}
+
+// check reports an error when the cache has been closed.
+func (c *Cache) check() error {
+	if c.closed.Load() {
+		return errors.ErrCacheClosed
+	}
+
+	return nil
+}
+
+// Close closes the cache. It reports [errors.ErrCacheClosed] when the cache is already closed. The
+// built-in client is closed only when it was created by [NewCache].
+func (c *Cache) Close() (err error) {
+	if c.closed.Swap(true) {
+		return errors.ErrCacheClosed
+	}
+
+	if c.builtin && c.opts.client != nil {
+		return c.opts.client.Close()
+	}
+
+	return nil
 }

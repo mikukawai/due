@@ -1,9 +1,10 @@
 package http
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/dobyte/due/v2/codes"
 	"github.com/dobyte/due/v2/log"
@@ -14,33 +15,37 @@ import (
 )
 
 type Resp struct {
-	Code    int    `json:"code"`              // 响应码
-	Message string `json:"message"`           // 响应消息
-	Details string `json:"details,omitempty"` // 响应详情
-	Data    any    `json:"data,omitempty"`    // 响应数据
+	Code    int    `json:"code"`              // Response code
+	Message string `json:"message"`           // Response message
+	Details string `json:"details,omitempty"` // Response details
+	Data    any    `json:"data,omitempty"`    // Response data
 }
 
+// Context is the HTTP context interface.
+//
+// It extends [fiber.Ctx] with a proxy API, response handling and a standard request.
 type Context interface {
 	fiber.Ctx
-	// CTX 获取fiber.Ctx
+	// CTX returns the underlying [fiber.Ctx].
 	CTX() fiber.Ctx
-	// Proxy 获取代理API
+	// Proxy returns the proxy API.
 	Proxy() *Proxy
-	// Failure 失败响应
+	// Failure writes a failure response.
 	Failure(rst any) error
-	// Success 成功响应
+	// Success writes a success response.
 	Success(data ...any) error
-	// StdRequest 获取标准请求（net/http）
+	// StdRequest returns the equivalent [http.Request] (net/http).
 	StdRequest() *http.Request
 }
 
+// context is the HTTP context.
 type context struct {
 	*fiber.DefaultCtx
-	proxy          *Proxy
-	stdRequest     *http.Request
-	stdRequestOnce *sync.Once
+	proxy      *Proxy
+	stdRequest *http.Request
 }
 
+// newContext creates an HTTP context from the fiber context ctx and the proxy.
 func newContext(ctx *fiber.DefaultCtx, proxy *Proxy) *context {
 	return &context{
 		DefaultCtx: ctx,
@@ -48,45 +53,49 @@ func newContext(ctx *fiber.DefaultCtx, proxy *Proxy) *context {
 	}
 }
 
-// CTX 获取fiber.Ctx
+// CTX returns the underlying [fiber.Ctx].
 func (c *context) CTX() fiber.Ctx {
 	return c
 }
 
-// Proxy 代理API
+// Proxy returns the proxy API.
 func (c *context) Proxy() *Proxy {
 	return c.proxy
 }
 
-// Failure 失败响应
+// Failure writes a failure response.
+//
+// It converts rst, which may be an error, a [codes.Code] or a *[codes.Code], into the matching
+// HTTP error response. It returns an error when writing the response fails.
 func (c *context) Failure(rst any) error {
 	switch v := rst.(type) {
 	case error:
-		code := codes.Convert(v)
-		message := code.Message()
+		if code := codes.Convert(v); code != nil {
+			message := code.Message()
 
-		switch parts := strings.SplitN(message, ": ", 2); len(parts) {
-		case 2:
-			if mode.IsReleaseMode() {
-				return c.JSON(&Resp{Code: code.Code(), Message: parts[0]})
-			} else {
-				return c.JSON(&Resp{Code: code.Code(), Message: parts[0], Details: parts[1]})
+			switch parts := strings.SplitN(message, ": ", 2); len(parts) {
+			case 2:
+				if mode.IsReleaseMode() {
+					return c.JSON(&Resp{Code: code.Code(), Message: parts[0]})
+				} else {
+					return c.JSON(&Resp{Code: code.Code(), Message: parts[0], Details: parts[1]})
+				}
+			default:
+				return c.JSON(&Resp{Code: code.Code(), Message: message})
 			}
-		case 1:
-			return c.JSON(&Resp{Code: code.Code(), Message: parts[0]})
-		default:
-			return c.JSON(&Resp{Code: code.Code(), Message: message})
 		}
 	case codes.Code:
 		return c.JSON(&Resp{Code: v.Code(), Message: v.Message()})
 	case *codes.Code:
-		return c.JSON(&Resp{Code: v.Code(), Message: v.Message()})
-	default:
-		return c.JSON(&Resp{Code: codes.Unknown.Code(), Message: codes.Unknown.Message()})
+		if v != nil {
+			return c.JSON(&Resp{Code: v.Code(), Message: v.Message()})
+		}
 	}
+
+	return c.JSON(&Resp{Code: codes.Unknown.Code(), Message: codes.Unknown.Message()})
 }
 
-// Success 成功响应
+// Success writes a success response.
 func (c *context) Success(data ...any) error {
 	if len(data) > 0 {
 		return c.JSON(&Resp{Code: codes.OK.Code(), Message: codes.OK.Message(), Data: data[0]})
@@ -95,23 +104,37 @@ func (c *context) Success(data ...any) error {
 	}
 }
 
-// Reset 重置上下文
+// Reset resets the context.
 func (c *context) Reset(fctx *fasthttp.RequestCtx) {
 	c.DefaultCtx.Reset(fctx)
-	c.stdRequestOnce = &sync.Once{}
+	c.stdRequest = nil
 }
 
-// StdRequest 获取标准请求（net/http）
+// StdRequest returns the equivalent [http.Request] (net/http).
+//
+// Note that the returned request body is copied into an independent buffer, so it stays safe to
+// use after the handler returns.
 func (c *context) StdRequest() *http.Request {
-	c.stdRequestOnce.Do(func() {
-		if c.stdRequest == nil {
-			c.stdRequest = &http.Request{}
-		}
+	if c.stdRequest != nil {
+		return c.stdRequest
+	}
 
-		if err := fasthttpadaptor.ConvertRequest(c.RequestCtx(), c.stdRequest, true); err != nil {
-			log.Error("ConvertRequest failed: %v", err)
+	c.stdRequest = &http.Request{}
+
+	if err := fasthttpadaptor.ConvertRequest(c.RequestCtx(), c.stdRequest, true); err != nil {
+		log.Errorf("convert request failed: %v", err)
+	}
+
+	// Copy the request body to avoid referencing fasthttp's pooled memory, which is overwritten
+	// once the connection is reused.
+	if c.stdRequest.Body != nil {
+		if body, err := io.ReadAll(c.stdRequest.Body); err != nil {
+			log.Errorf("copy request body failed: %v", err)
+		} else {
+			c.stdRequest.Body = io.NopCloser(bytes.NewReader(body))
+			c.stdRequest.ContentLength = int64(len(body))
 		}
-	})
+	}
 
 	return c.stdRequest
 }

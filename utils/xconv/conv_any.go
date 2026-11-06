@@ -1,3 +1,6 @@
+// Package xconv provides conversion utilities between arbitrary types, covering conversions among
+// numeric, string, boolean, byte, rune, duration and storage-capacity types as well as slice and
+// pointer conversions.
 package xconv
 
 import (
@@ -6,6 +9,9 @@ import (
 	"github.com/dobyte/due/v2/utils/xreflect"
 )
 
+// Anys converts val to a slice of any.
+//
+// Only slice and array types are supported; other types yield nil.
 func Anys(val any) []any {
 	if val == nil {
 		return nil
@@ -24,6 +30,7 @@ func Anys(val any) []any {
 	}
 }
 
+// AnysPointer converts val to a pointer to a slice of any.
 func AnysPointer(val any) *[]any {
 	v := Anys(val)
 	return &v

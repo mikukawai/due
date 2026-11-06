@@ -3,21 +3,22 @@ package gate
 import (
 	"context"
 
+	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/internal/transporter/internal/codes"
+	"github.com/dobyte/due/v2/internal/transporter/internal/drpc"
 	"github.com/dobyte/due/v2/internal/transporter/internal/protocol"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
-	"github.com/dobyte/due/v2/internal/transporter/internal/server"
 )
 
 type Server struct {
-	*server.Server
+	*drpc.Server
 	provider Provider
 }
 
-type ServerOptions = server.Options
+type ServerOptions = drpc.ServerOptions
 
 func NewServer(provider Provider, opts *ServerOptions) (*Server, error) {
-	serv, err := server.NewServer(opts)
+	serv, err := drpc.NewServer(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -45,9 +46,12 @@ func (s *Server) init() {
 	s.RegisterHandler(route.SetState, s.setState)
 }
 
-// 绑定用户
-func (s *Server) bind(conn *server.Conn, data []byte) error {
-	seq, cid, uid, err := protocol.DecodeBindReq(data)
+// bind binds the user to the connection.
+func (s *Server) bind(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	cid, uid, err := protocol.DecodeBindReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -56,14 +60,17 @@ func (s *Server) bind(conn *server.Conn, data []byte) error {
 
 	if seq == 0 {
 		return err
-	} else {
-		return conn.Send(protocol.EncodeBindRes(seq, codes.ErrorToCode(err)))
 	}
+
+	return conn.Push(protocol.EncodeBindRes(seq, codes.ErrorToCode(err)))
 }
 
-// 解绑用户
-func (s *Server) unbind(conn *server.Conn, data []byte) error {
-	seq, uid, err := protocol.DecodeUnbindReq(data)
+// unbind unbinds the user from its connection.
+func (s *Server) unbind(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	uid, err := protocol.DecodeUnbindReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -72,14 +79,17 @@ func (s *Server) unbind(conn *server.Conn, data []byte) error {
 
 	if seq == 0 {
 		return err
-	} else {
-		return conn.Send(protocol.EncodeUnbindRes(seq, codes.ErrorToCode(err)))
 	}
+
+	return conn.Push(protocol.EncodeUnbindRes(seq, codes.ErrorToCode(err)))
 }
 
-// 获取IP地址
-func (s *Server) getIP(conn *server.Conn, data []byte) error {
-	seq, kind, target, err := protocol.DecodeGetIPReq(data)
+// getIP returns the client IP address.
+func (s *Server) getIP(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	kind, target, err := protocol.DecodeGetIPReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -89,13 +99,16 @@ func (s *Server) getIP(conn *server.Conn, data []byte) error {
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeGetIPRes(seq, codes.ErrorToCode(err), ip))
+		return conn.Push(protocol.EncodeGetIPRes(seq, codes.ErrorToCode(err), ip))
 	}
 }
 
-// 统计在线人数
-func (s *Server) stat(conn *server.Conn, data []byte) error {
-	seq, kind, err := protocol.DecodeStatReq(data)
+// stat returns the total number of online sessions.
+func (s *Server) stat(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	kind, err := protocol.DecodeStatReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -105,13 +118,16 @@ func (s *Server) stat(conn *server.Conn, data []byte) error {
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeStatRes(seq, codes.ErrorToCode(err), uint64(total)))
+		return conn.Push(protocol.EncodeStatRes(seq, codes.ErrorToCode(err), uint64(total)))
 	}
 }
 
-// 检测用户是否在线
-func (s *Server) isOnline(conn *server.Conn, data []byte) error {
-	seq, kind, target, err := protocol.DecodeIsOnlineReq(data)
+// isOnline reports whether the target session is online.
+func (s *Server) isOnline(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	kind, target, err := protocol.DecodeIsOnlineReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -121,13 +137,16 @@ func (s *Server) isOnline(conn *server.Conn, data []byte) error {
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeIsOnlineRes(seq, codes.ErrorToCode(err), isOnline))
+		return conn.Push(protocol.EncodeIsOnlineRes(seq, codes.ErrorToCode(err), isOnline))
 	}
 }
 
-// 断开连接
-func (s *Server) disconnect(conn *server.Conn, data []byte) error {
-	seq, kind, target, force, err := protocol.DecodeDisconnectReq(data)
+// disconnect disconnects the target session.
+func (s *Server) disconnect(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	kind, target, force, err := protocol.DecodeDisconnectReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -137,77 +156,86 @@ func (s *Server) disconnect(conn *server.Conn, data []byte) error {
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeDisconnectRes(seq, codes.ErrorToCode(err)))
+		return conn.Push(protocol.EncodeDisconnectRes(seq, codes.ErrorToCode(err)))
 	}
 }
 
-// 推送单个消息
-func (s *Server) push(conn *server.Conn, data []byte) error {
-	seq, kind, target, disconnect, message, err := protocol.DecodePushReq(data)
+// push pushes a single message.
+//
+// Note that buf is not released here; it must be released when the message is sent.
+func (s *Server) push(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	kind, target, disconnect, buf, err := protocol.DecodePushReq(req)
 	if err != nil {
+		req.Release()
 		return err
 	}
 
-	err = s.provider.Push(context.Background(), kind, target, disconnect, message)
+	err = s.provider.Push(context.Background(), kind, target, disconnect, buf)
 
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodePushRes(seq, codes.ErrorToCode(err)))
+		return conn.Push(protocol.EncodePushRes(seq, codes.ErrorToCode(err)))
 	}
 }
 
-// 推送组播消息
-func (s *Server) multicast(conn *server.Conn, data []byte) error {
-	seq, kind, targets, disconnect, message, err := protocol.DecodeMulticastReq(data)
+// multicast pushes a message to multiple targets.
+func (s *Server) multicast(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	kind, targets, disconnect, buf, err := protocol.DecodeMulticastReq(req)
 	if err != nil {
+		req.Release()
 		return err
 	}
 
-	total, err := s.provider.Multicast(context.Background(), kind, targets, disconnect, message)
+	total, err := s.provider.Multicast(context.Background(), kind, targets, disconnect, buf)
 
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeMulticastRes(seq, codes.ErrorToCode(err), uint64(total)))
+		return conn.Push(protocol.EncodeMulticastRes(seq, codes.ErrorToCode(err), uint64(total)))
 	}
 }
 
-// 推送广播消息
-func (s *Server) broadcast(conn *server.Conn, data []byte) error {
-	seq, kind, disconnect, message, err := protocol.DecodeBroadcastReq(data)
+// broadcast pushes a message to all sessions.
+func (s *Server) broadcast(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	kind, disconnect, buf, err := protocol.DecodeBroadcastReq(req)
 	if err != nil {
+		req.Release()
 		return err
 	}
 
-	total, err := s.provider.Broadcast(context.Background(), kind, disconnect, message)
+	total, err := s.provider.Broadcast(context.Background(), kind, disconnect, buf)
 
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeBroadcastRes(seq, codes.ErrorToCode(err), uint64(total)))
+		return conn.Push(protocol.EncodeBroadcastRes(seq, codes.ErrorToCode(err), uint64(total)))
 	}
 }
 
-// 发布频道消息
-func (s *Server) publish(conn *server.Conn, data []byte) error {
-	seq, channel, disconnect, message, err := protocol.DecodePublishReq(data)
+// publish publishes a channel message.
+func (s *Server) publish(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	channel, disconnect, buf, err := protocol.DecodePublishReq(req)
 	if err != nil {
+		req.Release()
 		return err
 	}
 
-	total, err := s.provider.Publish(context.Background(), channel, disconnect, message)
+	total, err := s.provider.Publish(context.Background(), channel, disconnect, buf)
 
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodePublishRes(seq, codes.ErrorToCode(err), uint64(total)))
+		return conn.Push(protocol.EncodePublishRes(seq, codes.ErrorToCode(err), uint64(total)))
 	}
 }
 
-// 订阅频道
-func (s *Server) subscribe(conn *server.Conn, data []byte) error {
-	seq, kind, targets, channel, err := protocol.DecodeSubscribeReq(data)
+// subscribe subscribes the targets to a channel.
+func (s *Server) subscribe(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	kind, targets, channel, err := protocol.DecodeSubscribeReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -217,13 +245,16 @@ func (s *Server) subscribe(conn *server.Conn, data []byte) error {
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeSubscribeRes(seq, codes.ErrorToCode(err)))
+		return conn.Push(protocol.EncodeSubscribeRes(seq, codes.ErrorToCode(err)))
 	}
 }
 
-// 取消订阅频道
-func (s *Server) unsubscribe(conn *server.Conn, data []byte) error {
-	seq, kind, targets, channel, err := protocol.DecodeUnsubscribeReq(data)
+// unsubscribe unsubscribes the targets from a channel.
+func (s *Server) unsubscribe(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	kind, targets, channel, err := protocol.DecodeUnsubscribeReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -233,13 +264,16 @@ func (s *Server) unsubscribe(conn *server.Conn, data []byte) error {
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeUnsubscribeRes(seq, codes.ErrorToCode(err)))
+		return conn.Push(protocol.EncodeUnsubscribeRes(seq, codes.ErrorToCode(err)))
 	}
 }
 
-// 获取状态
-func (s *Server) getState(conn *server.Conn, data []byte) error {
-	seq, err := protocol.DecodeGetStateReq(data)
+// getState returns the state.
+func (s *Server) getState(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	err := protocol.DecodeGetStateReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -249,13 +283,16 @@ func (s *Server) getState(conn *server.Conn, data []byte) error {
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeGetStateRes(seq, codes.ErrorToCode(err), state))
+		return conn.Push(protocol.EncodeGetStateRes(seq, codes.ErrorToCode(err), state))
 	}
 }
 
-// 设置状态
-func (s *Server) setState(conn *server.Conn, data []byte) error {
-	seq, state, err := protocol.DecodeSetStateReq(data)
+// setState sets the state.
+func (s *Server) setState(conn *drpc.ServerConn, seq uint64, req *buffer.Bytes) error {
+	state, err := protocol.DecodeSetStateReq(req)
+
+	req.Release()
+
 	if err != nil {
 		return err
 	}
@@ -265,6 +302,6 @@ func (s *Server) setState(conn *server.Conn, data []byte) error {
 	if seq == 0 {
 		return err
 	} else {
-		return conn.Send(protocol.EncodeSetStateRes(seq, codes.ErrorToCode(err)))
+		return conn.Push(protocol.EncodeSetStateRes(seq, codes.ErrorToCode(err)))
 	}
 }

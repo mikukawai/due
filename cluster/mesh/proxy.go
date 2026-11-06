@@ -4,220 +4,370 @@ import (
 	"context"
 
 	"github.com/dobyte/due/v2/cluster"
+	"github.com/dobyte/due/v2/core/buffer"
+	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/internal/link"
 	"github.com/dobyte/due/v2/registry"
-	"github.com/dobyte/due/v2/session"
 	"github.com/dobyte/due/v2/transport"
 )
 
+// Proxy is the mesh proxy.
+//
+// It provides the complete API exposed by the mesh server, including gate/node linking and message
+// pushing.
 type Proxy struct {
-	mesh       *Mesh            // 微服务器
-	gateLinker *link.GateLinker // 网关链接器
-	nodeLinker *link.NodeLinker // 节点链接器
+	mesh       *Mesh            // mesh server
+	gateLinker *link.GateLinker // gate linker
+	nodeLinker *link.NodeLinker // node linker
 }
 
+// newProxy creates a mesh proxy.
+//
+// It initializes the gate linker and the node linker, reusing the mesh's codec, locator, registry
+// and other options underneath.
 func newProxy(mesh *Mesh) *Proxy {
 	opts := &link.Options{
-		ID:                mesh.opts.id,
-		Kind:              cluster.Mesh,
-		Codec:             mesh.opts.codec,
-		Locator:           mesh.opts.locator,
-		Registry:          mesh.opts.registry,
-		Encryptor:         mesh.opts.encryptor,
-		ConnNum:           mesh.opts.connNum,
-		CallTimeout:       mesh.opts.callTimeout,
-		DialTimeout:       mesh.opts.dialTimeout,
-		DialRetryTimes:    mesh.opts.dialRetryTimes,
-		WriteTimeout:      mesh.opts.writeTimeout,
-		WriteQueueSize:    mesh.opts.writeQueueSize,
-		FaultRecoveryTime: mesh.opts.faultRecoveryTime,
+		ID:                  mesh.opts.id,
+		Kind:                cluster.Mesh,
+		Codec:               mesh.opts.codec,
+		Locator:             mesh.opts.locator,
+		Registry:            mesh.opts.registry,
+		Encryptor:           mesh.opts.encryptor,
+		ConnNum:             mesh.opts.linker.connNum,
+		CallTimeout:         mesh.opts.linker.callTimeout,
+		DialTimeout:         mesh.opts.linker.dialTimeout,
+		DialRetryTimes:      mesh.opts.linker.dialRetryTimes,
+		FaultRecoveryTime:   mesh.opts.linker.faultRecoveryTime,
+		CommandQueueSize:    mesh.opts.linker.commandQueueSize,
+		CommandWriteTimeout: mesh.opts.linker.commandWriteTimeout,
 	}
 
 	return &Proxy{
 		mesh:       mesh,
-		gateLinker: link.NewGateLinker(mesh.opts.ctx, opts),
-		nodeLinker: link.NewNodeLinker(mesh.opts.ctx, opts),
+		gateLinker: link.NewGateLinker(mesh.ctx, opts),
+		nodeLinker: link.NewNodeLinker(mesh.ctx, opts),
 	}
 }
 
-// GetID 获取当前实例ID
+// GetID returns the current instance ID.
 func (p *Proxy) GetID() string {
 	return p.mesh.opts.id
 }
 
-// GetName 获取当前实例名称
+// GetName returns the current instance name.
 func (p *Proxy) GetName() string {
 	return p.mesh.opts.name
 }
 
-// AddServiceProvider 添加服务提供者
+// GetState returns the current mesh state.
+func (p *Proxy) GetState() cluster.State {
+	return p.mesh.getState()
+}
+
+// SetState sets the current mesh state, returning an error when the state cannot be set.
+func (p *Proxy) SetState(state cluster.State) error {
+	return p.mesh.setState(state)
+}
+
+// AddServiceProvider adds a service provider. The name is the service name, desc is the service
+// description and provider is the service provider.
 func (p *Proxy) AddServiceProvider(name string, desc, provider any) {
 	p.mesh.addServiceProvider(name, desc, provider)
 }
 
-// AddHookListener 添加钩子监听器
+// AddHookListener adds a hook listener for the given hook.
 func (p *Proxy) AddHookListener(hook cluster.Hook, handler HookHandler) {
 	p.mesh.addHookListener(hook, handler)
 }
 
-// NewMeshClient 新建微服务客户端
-// target参数可分为三种模式:
-// 服务直连模式: 	direct://127.0.0.1:8011
-// 服务直连模式: 	direct://711baf8d-8a06-11ef-b7df-f4f19e1f0070
-// 服务发现模式: 	discovery://service_name
+// NewMeshClient creates a new mesh client.
+//
+// The target parameter supports three forms:
+//
+//	direct://127.0.0.1:8011                        (direct connection by address)
+//	direct://711baf8d-8a06-11ef-b7df-f4f19e1f0070  (direct connection by instance ID)
+//	discovery://service_name                       (service discovery by service name)
+//
+// It returns an error when the mesh has been shut down.
 func (p *Proxy) NewMeshClient(target string) (transport.Client, error) {
-	return p.mesh.opts.transporter.NewClient(target)
-}
-
-// HasGate 检测是否存在某个网关
-func (p *Proxy) HasGate(gid string) bool {
-	return p.gateLinker.HasGate(gid)
-}
-
-// AskGate 检测用户是否在给定的网关上
-func (p *Proxy) AskGate(ctx context.Context, gid string, uid int64) (string, bool, error) {
-	return p.gateLinker.AskGate(ctx, gid, uid)
-}
-
-// LocateGate 定位用户所在网关
-func (p *Proxy) LocateGate(ctx context.Context, uid int64) (string, error) {
-	return p.gateLinker.LocateGate(ctx, uid)
-}
-
-// BindGate 绑定网关
-func (p *Proxy) BindGate(ctx context.Context, gid string, cid, uid int64) error {
-	return p.gateLinker.BindGate(ctx, gid, cid, uid)
-}
-
-// UnbindGate 解绑网关
-func (p *Proxy) UnbindGate(ctx context.Context, uid int64) error {
-	return p.gateLinker.UnbindGate(ctx, uid)
-}
-
-// FetchGateList 拉取网关列表
-func (p *Proxy) FetchGateList(ctx context.Context, states ...cluster.State) ([]*registry.ServiceInstance, error) {
-	return p.gateLinker.FetchGateList(ctx, states...)
-}
-
-// HasNode 检测是否存在某个节点
-func (p *Proxy) HasNode(nid string) bool {
-	return p.nodeLinker.HasNode(nid)
-}
-
-// AskNode 检测用户是否在给定的节点上
-func (p *Proxy) AskNode(ctx context.Context, uid int64, name, nid string) (string, bool, error) {
-	return p.nodeLinker.AskNode(ctx, uid, name, nid)
-}
-
-// LocateNode 定位用户所在节点
-func (p *Proxy) LocateNode(ctx context.Context, uid int64, name string) (string, error) {
-	return p.nodeLinker.LocateNode(ctx, uid, name)
-}
-
-// LocateNodes 定位用户所在节点列表
-func (p *Proxy) LocateNodes(ctx context.Context, uid int64) (map[string]string, error) {
-	return p.nodeLinker.LocateNodes(ctx, uid)
-}
-
-// BindNode 绑定节点
-// 单个用户可以绑定到多个节点服务器上，相同名称的节点服务器只能绑定一个，多次绑定会到相同名称的节点服务器会覆盖之前的绑定。
-// 绑定操作会通过发布订阅方式同步到网关服务器和其他相关节点服务器上。
-func (p *Proxy) BindNode(ctx context.Context, uid int64, name, nid string) error {
-	return p.nodeLinker.BindNode(ctx, uid, name, nid)
-}
-
-// UnbindNode 解绑节点
-// 解绑时会对对应名称的节点服务器进行解绑，解绑时会对解绑节点ID进行校验，不匹配则解绑失败。
-// 解绑操作会通过发布订阅方式同步到网关服务器和其他相关节点服务器上。
-func (p *Proxy) UnbindNode(ctx context.Context, uid int64, name, nid string) error {
-	return p.nodeLinker.UnbindNode(ctx, uid, name, nid)
-}
-
-// FetchNodeList 拉取节点列表
-func (p *Proxy) FetchNodeList(ctx context.Context, states ...cluster.State) ([]*registry.ServiceInstance, error) {
-	return p.nodeLinker.FetchNodeList(ctx, states...)
-}
-
-// PackMessage 打包消息
-func (p *Proxy) PackMessage(message *cluster.Message) ([]byte, error) {
-	buf, err := p.gateLinker.PackMessage(message, true)
-	if err != nil {
-		return nil, err
+	if p.mesh.isShut() {
+		return nil, errors.ErrMeshShutdown
+	} else {
+		return p.mesh.opts.transporter.NewClient(target)
 	}
-
-	return buf.Bytes(), nil
 }
 
-// PackBuffer 打包Buffer
+// HasGate reports whether the given gate exists. It returns an error when the mesh has been shut
+// down.
+func (p *Proxy) HasGate(gid string) (bool, error) {
+	if p.mesh.isShut() {
+		return false, errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.HasGate(gid), nil
+	}
+}
+
+// AskGate reports whether the user is on the given gate. It returns the gate ID the user is
+// actually on, whether the user is on the given gate, and an error when the mesh has been shut
+// down.
+func (p *Proxy) AskGate(ctx context.Context, gid string, uid int64) (string, bool, error) {
+	if p.mesh.isShut() {
+		return "", false, errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.AskGate(ctx, gid, uid)
+	}
+}
+
+// LocateGate locates the gate the user is on and returns its gate ID, or an error when the mesh
+// has been shut down.
+func (p *Proxy) LocateGate(ctx context.Context, uid int64) (string, error) {
+	if p.mesh.isShut() {
+		return "", errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.LocateGate(ctx, uid)
+	}
+}
+
+// BindGate binds the gate, associating the user with the connection. It returns an error when the
+// mesh has been shut down or binding fails.
+func (p *Proxy) BindGate(ctx context.Context, gid string, cid, uid int64) error {
+	if p.mesh.isShut() {
+		return errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.BindGate(ctx, gid, cid, uid)
+	}
+}
+
+// UnbindGate unbinds the gate. It returns an error when the mesh has been shut down or unbinding
+// fails.
+func (p *Proxy) UnbindGate(ctx context.Context, uid int64) error {
+	if p.mesh.isShut() {
+		return errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.UnbindGate(ctx, uid)
+	}
+}
+
+// FetchGateList fetches the gate list filtered by the given states, or an error when the mesh has
+// been shut down.
+func (p *Proxy) FetchGateList(ctx context.Context, states ...cluster.State) ([]*registry.ServiceInstance, error) {
+	if p.mesh.isShut() {
+		return nil, errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.FetchGateList(ctx, states...)
+	}
+}
+
+// HasNode reports whether the given node exists. It returns an error when the mesh has been shut
+// down.
+func (p *Proxy) HasNode(nid string) (bool, error) {
+	if p.mesh.isShut() {
+		return false, errors.ErrMeshShutdown
+	} else {
+		return p.nodeLinker.HasNode(nid), nil
+	}
+}
+
+// AskNode reports whether the user is on the given node. It returns the node ID the user is
+// actually on, whether the user is on the given node, and an error when the mesh has been shut
+// down.
+func (p *Proxy) AskNode(ctx context.Context, uid int64, name, nid string) (string, bool, error) {
+	if p.mesh.isShut() {
+		return "", false, errors.ErrMeshShutdown
+	} else {
+		return p.nodeLinker.AskNode(ctx, uid, name, nid)
+	}
+}
+
+// LocateNode locates the node the user is on and returns its node ID, or an error when the mesh
+// has been shut down.
+func (p *Proxy) LocateNode(ctx context.Context, uid int64, name string) (string, error) {
+	if p.mesh.isShut() {
+		return "", errors.ErrMeshShutdown
+	} else {
+		return p.nodeLinker.LocateNode(ctx, uid, name)
+	}
+}
+
+// LocateNodes locates the nodes the user is on and returns a map from node name to node ID, or an
+// error when the mesh has been shut down.
+func (p *Proxy) LocateNodes(ctx context.Context, uid int64) (map[string]string, error) {
+	if p.mesh.isShut() {
+		return nil, errors.ErrMeshShutdown
+	} else {
+		return p.nodeLinker.LocateNodes(ctx, uid)
+	}
+}
+
+// BindNode binds a node.
+//
+// A single user may bind to multiple node servers, but only one node server per name; binding to a
+// node server with the same name multiple times overwrites the previous binding. The binding is
+// synchronized to the gate server and other related node servers through publish-subscribe. It
+// returns an error when the mesh has been shut down or binding fails.
+func (p *Proxy) BindNode(ctx context.Context, uid int64, name, nid string) error {
+	if p.mesh.isShut() {
+		return errors.ErrMeshShutdown
+	} else {
+		return p.nodeLinker.BindNode(ctx, uid, name, nid)
+	}
+}
+
+// UnbindNode unbinds a node.
+//
+// It unbinds the node server with the corresponding name and validates the node ID; the unbind
+// fails when the node ID does not match. The unbind is synchronized to the gate server and other
+// related node servers through publish-subscribe. It returns an error when the mesh has been shut
+// down or unbinding fails.
+func (p *Proxy) UnbindNode(ctx context.Context, uid int64, name, nid string) error {
+	if p.mesh.isShut() {
+		return errors.ErrMeshShutdown
+	} else {
+		return p.nodeLinker.UnbindNode(ctx, uid, name, nid)
+	}
+}
+
+// FetchNodeList fetches the node list filtered by the given states, or an error when the mesh has
+// been shut down.
+func (p *Proxy) FetchNodeList(ctx context.Context, states ...cluster.State) ([]*registry.ServiceInstance, error) {
+	if p.mesh.isShut() {
+		return nil, errors.ErrMeshShutdown
+	} else {
+		return p.nodeLinker.FetchNodeList(ctx, states...)
+	}
+}
+
+// PackMessage packs the given message and returns the packed buffer, whose ownership is
+// transferred to the caller and must be released with [buffer.Buffer.Release], or an error when
+// packing fails.
+func (p *Proxy) PackMessage(message *cluster.Message) (buffer.Buffer, error) {
+	return p.gateLinker.PackMessage(message, true)
+}
+
+// PackBuffer packs the given message content and returns the packed message bytes, or an error
+// when packing fails.
 func (p *Proxy) PackBuffer(message any) ([]byte, error) {
 	return p.gateLinker.PackBuffer(message, true)
 }
 
-// GetIP 获取客户端IP
+// GetIP returns the client IP, or an error when the mesh has been shut down or the query fails.
 func (p *Proxy) GetIP(ctx context.Context, args *cluster.GetIPArgs) (string, error) {
-	return p.gateLinker.GetIP(ctx, args)
+	if p.mesh.isShut() {
+		return "", errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.GetIP(ctx, args)
+	}
 }
 
-// Stat 统计会话总数
-func (p *Proxy) Stat(ctx context.Context, kind session.Kind) (int64, error) {
-	return p.gateLinker.Stat(ctx, kind)
+// Stat returns the total number of sessions, or an error when the mesh has been shut down.
+func (p *Proxy) Stat(ctx context.Context, kind cluster.Session) (int64, error) {
+	if p.mesh.isShut() {
+		return 0, errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.Stat(ctx, kind)
+	}
 }
 
-// IsOnline 检测是否在线
+// IsOnline reports whether the session is online, or an error when the mesh has been shut down or
+// the query fails.
 func (p *Proxy) IsOnline(ctx context.Context, args *cluster.IsOnlineArgs) (bool, error) {
-	return p.gateLinker.IsOnline(ctx, args)
+	if p.mesh.isShut() {
+		return false, errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.IsOnline(ctx, args)
+	}
 }
 
-// Disconnect 断开连接
+// Disconnect disconnects the session, or returns an error when the mesh has been shut down or
+// disconnecting fails.
 func (p *Proxy) Disconnect(ctx context.Context, args *cluster.DisconnectArgs) error {
-	return p.gateLinker.Disconnect(ctx, args)
+	if p.mesh.isShut() {
+		return errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.Disconnect(ctx, args)
+	}
 }
 
-// Push 推送消息
-// args.Ack设为true时可获得消息真实发送的情况
+// Push pushes a message. Setting args.Ack to true reports the actual delivery result. It returns
+// an error when the mesh has been shut down or pushing fails.
 func (p *Proxy) Push(ctx context.Context, args *cluster.PushArgs) error {
-	return p.gateLinker.Push(ctx, args)
+	if p.mesh.isShut() {
+		return errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.Push(ctx, args)
+	}
 }
 
-// Multicast 推送组播消息
-// 要想获得推送成功的目标数，需将args.Ack设为true
+// Multicast pushes a multicast message and returns the number of targets pushed successfully, or
+// an error when the mesh has been shut down or pushing fails. To get the number of successful
+// targets, set args.Ack to true.
 func (p *Proxy) Multicast(ctx context.Context, args *cluster.MulticastArgs) (int64, error) {
-	return p.gateLinker.Multicast(ctx, args)
+	if p.mesh.isShut() {
+		return 0, errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.Multicast(ctx, args)
+	}
 }
 
-// Broadcast 推送广播消息
-// 要想获得推送成功的目标数，需将args.Ack设为true
+// Broadcast pushes a broadcast message and returns the number of targets pushed successfully, or
+// an error when the mesh has been shut down or pushing fails. To get the number of successful
+// targets, set args.Ack to true.
 func (p *Proxy) Broadcast(ctx context.Context, args *cluster.BroadcastArgs) (int64, error) {
-	return p.gateLinker.Broadcast(ctx, args)
+	if p.mesh.isShut() {
+		return 0, errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.Broadcast(ctx, args)
+	}
 }
 
-// Publish 发布消息
-// 要想获得推送成功的目标数，需将args.Ack设为true
+// Publish publishes a message and returns the number of targets published successfully, or an
+// error when the mesh has been shut down or publishing fails. To get the number of successful
+// targets, set args.Ack to true.
 func (p *Proxy) Publish(ctx context.Context, args *cluster.PublishArgs) (int64, error) {
-	return p.gateLinker.Publish(ctx, args)
+	if p.mesh.isShut() {
+		return 0, errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.Publish(ctx, args)
+	}
 }
 
-// Subscribe 订阅频道
+// Subscribe subscribes to a channel, or returns an error when the mesh has been shut down or
+// subscribing fails.
 func (p *Proxy) Subscribe(ctx context.Context, args *cluster.SubscribeArgs) error {
-	return p.gateLinker.Subscribe(ctx, args)
+	if p.mesh.isShut() {
+		return errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.Subscribe(ctx, args)
+	}
 }
 
-// Unsubscribe 取消订阅频道
+// Unsubscribe unsubscribes from a channel, or returns an error when the mesh has been shut down or
+// unsubscribing fails.
 func (p *Proxy) Unsubscribe(ctx context.Context, args *cluster.UnsubscribeArgs) error {
-	return p.gateLinker.Unsubscribe(ctx, args)
+	if p.mesh.isShut() {
+		return errors.ErrMeshShutdown
+	} else {
+		return p.gateLinker.Unsubscribe(ctx, args)
+	}
 }
 
-// Deliver 投递消息给节点处理
+// Deliver delivers a message to a node for processing, or returns an error when the mesh has been
+// shut down or delivering fails.
 func (p *Proxy) Deliver(ctx context.Context, args *cluster.DeliverArgs) error {
-	return p.nodeLinker.Deliver(ctx, &link.DeliverArgs{
-		NID:    args.NID,
-		UID:    args.UID,
-		Route:  args.Message.Route,
-		Buffer: args.Message,
-	})
+	if p.mesh.isShut() {
+		return errors.ErrMeshShutdown
+	} else {
+		return p.nodeLinker.Deliver(ctx, &link.DeliverArgs{
+			NID:    args.NID,
+			UID:    args.UID,
+			Route:  args.Message.Route,
+			Buffer: args.Message,
+		})
+	}
 }
 
-// 开始监听
+// watch starts watching user locations and cluster instance changes; both the gate linker and the
+// node linker subscribe to the related changes.
 func (p *Proxy) watch() {
 	p.gateLinker.WatchUserLocate()
 

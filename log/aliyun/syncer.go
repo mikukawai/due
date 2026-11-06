@@ -1,35 +1,40 @@
 package aliyun
 
 import (
-	"bytes"
 	"fmt"
 	"sync"
-	"time"
 
 	sls "github.com/aliyun/aliyun-log-go-sdk"
 	"github.com/aliyun/aliyun-log-go-sdk/producer"
+	"github.com/dobyte/due/v2/encoding/json"
 	"github.com/dobyte/due/v2/log"
 )
 
 const (
-	fieldKeyLevel     = "level"
-	fieldKeyTime      = "time"
-	fieldKeyFile      = "file"
-	fieldKeyMsg       = "msg"
-	fieldKeyStack     = "stack"
-	fieldKeyStackFunc = "func"
-	fieldKeyStackFile = "file"
+	fieldKeyLevel = "level"
+	fieldKeyTime  = "time"
+	fieldKeyFile  = "file"
+	fieldKeyMsg   = "msg"
+	fieldKeyStack = "stack"
 )
 
+// Name is the syncer name.
 const Name = "aliyun"
 
+// Syncer is an Aliyun SLS log syncer.
 type Syncer struct {
-	opts       *options
-	producer   *producer.Producer
-	rawPool    sync.Pool
-	bufferPool sync.Pool
+	opts     *options
+	producer *producer.Producer
+	rawPool  sync.Pool
 }
 
+// stackFrame is a stack frame.
+type stackFrame struct {
+	Func string `json:"func"`
+	File string `json:"file"`
+}
+
+// NewSyncer returns a new Aliyun SLS log syncer. The optional opts configure the syncer.
 func NewSyncer(opts ...Option) *Syncer {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -38,13 +43,12 @@ func NewSyncer(opts ...Option) *Syncer {
 
 	config := producer.GetDefaultProducerConfig()
 	config.Endpoint = o.endpoint
-	config.AccessKeyID = o.accessKeyID
-	config.AccessKeySecret = o.accessKeySecret
+	config.CredentialsProvider = sls.NewStaticCredentialsProvider(o.accessKeyID, o.accessKeySecret, "")
 	config.AllowLogLevel = "error"
 
 	producer, err := producer.NewProducer(config)
 	if err != nil {
-		panic(err)
+		return nil
 	} else {
 		producer.Start()
 	}
@@ -53,27 +57,26 @@ func NewSyncer(opts ...Option) *Syncer {
 	s.opts = o
 	s.producer = producer
 	s.rawPool = sync.Pool{New: func() any { return make(map[string]string, 5) }}
-	s.bufferPool = sync.Pool{New: func() any { return &bytes.Buffer{} }}
 
 	return s
 }
 
-// Name 同步器名称
+// Name returns the syncer name.
 func (s *Syncer) Name() string {
 	return Name
 }
 
-// Write 写入日志
+// Write writes the given entity to Aliyun SLS. It returns any error encountered while writing.
 func (s *Syncer) Write(entity *log.Entity) error {
 	return s.producer.SendLog(s.opts.project, s.opts.logstore, s.opts.topic, s.opts.source, s.makeLog(entity))
 }
 
-// Close 关闭同步器
+// Close closes the Aliyun SLS producer.
 func (s *Syncer) Close() error {
 	return s.producer.Close(5000)
 }
 
-// 构建日志
+// makeLog converts an entity into an SLS log.
 func (s *Syncer) makeLog(entity *log.Entity) *sls.Log {
 	raw := s.rawPool.Get().(map[string]string)
 	defer func() {
@@ -87,25 +90,17 @@ func (s *Syncer) makeLog(entity *log.Entity) *sls.Log {
 	raw[fieldKeyMsg] = entity.Message
 
 	if len(entity.Frames) > 0 {
-		b := s.bufferPool.Get().(*bytes.Buffer)
-		defer func() {
-			b.Reset()
-			s.bufferPool.Put(b)
-		}()
-
-		fmt.Fprint(b, "[")
-		for i, frame := range entity.Frames {
-			if i == 0 {
-				fmt.Fprintf(b, `{"%s":"%s"`, fieldKeyStackFunc, frame.Function)
-			} else {
-				fmt.Fprintf(b, `,{"%s":"%s"`, fieldKeyStackFunc, frame.Function)
-			}
-			fmt.Fprintf(b, `,"%s":"%s:%d"}`, fieldKeyStackFile, frame.File, frame.Line)
+		frames := make([]stackFrame, 0, len(entity.Frames))
+		for _, f := range entity.Frames {
+			frames = append(frames, stackFrame{
+				Func: f.Function,
+				File: fmt.Sprintf("%s:%d", f.File, f.Line),
+			})
 		}
-		fmt.Fprint(b, "]")
 
-		raw[fieldKeyStack] = b.String()
+		data, _ := json.Marshal(frames)
+		raw[fieldKeyStack] = string(data)
 	}
 
-	return producer.GenerateLog(uint32(time.Now().Unix()), raw)
+	return producer.GenerateLog(uint32(entity.Now.Unix()), raw)
 }

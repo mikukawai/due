@@ -1,9 +1,12 @@
 package internal
 
-// Format 日志输出格式
+// Format is the log output format.
 type Format string
 
 const (
-	FormatText Format = "text" // 文本格式
-	FormatJson Format = "json" // JSON格式
+	FormatText Format = "text" // Text format
+	FormatJson Format = "json" // JSON format
 )
+
+// defaultBufferSize is the initial capacity of the log buffer.
+const defaultBufferSize = 2048

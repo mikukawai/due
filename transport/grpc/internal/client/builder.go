@@ -3,12 +3,19 @@ package client
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	_ "github.com/dobyte/due/transport/grpc/v2/internal/balancer/ch"
+	_ "github.com/dobyte/due/transport/grpc/v2/internal/balancer/random"
+	_ "github.com/dobyte/due/transport/grpc/v2/internal/balancer/wrr"
 	iresolver "github.com/dobyte/due/transport/grpc/v2/internal/resolver"
 	"github.com/dobyte/due/transport/grpc/v2/internal/resolver/direct"
 	"github.com/dobyte/due/transport/grpc/v2/internal/resolver/discovery"
 	"github.com/dobyte/due/v2/cluster"
+	"github.com/dobyte/due/v2/core/def"
+	"github.com/dobyte/due/v2/errors"
+	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/registry"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
@@ -19,13 +26,17 @@ import (
 
 const defaultTimeout = 10 * time.Second
 
+// Options holds the client options.
 type Options struct {
 	CAFile     string
 	ServerName string
+	Dispatch   def.Dispatch
 	Discovery  registry.Discovery
 	DialOpts   []grpc.DialOption
 }
 
+// Builder is the client connection builder that creates gRPC connections and manages their
+// lifecycle.
 type Builder struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -36,8 +47,13 @@ type Builder struct {
 	sfg         singleflight.Group
 	connections sync.Map
 	watcher     registry.Watcher
+	closed      atomic.Bool
 }
 
+// NewBuilder returns a new client connection builder.
+//
+// It initializes the transport credentials, resolvers and load balancing strategy according to the
+// options.
 func NewBuilder(opts *Options) *Builder {
 	var (
 		err  error
@@ -49,6 +65,10 @@ func NewBuilder(opts *Options) *Builder {
 			return &Builder{err: err}
 		}
 	} else {
+		if opts.CAFile != "" || opts.ServerName != "" {
+			log.Warn("grpc client use insecure credentials")
+		}
+
 		cred = insecure.NewCredentials()
 	}
 
@@ -64,18 +84,32 @@ func NewBuilder(opts *Options) *Builder {
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	b.resolvers = resolvers
 	b.dialOpts = make([]grpc.DialOption, 0, len(opts.DialOpts)+2)
-	b.dialOpts = append(b.dialOpts, opts.DialOpts...)
 	b.dialOpts = append(b.dialOpts, grpc.WithTransportCredentials(cred))
 	b.dialOpts = append(b.dialOpts, grpc.WithResolvers(resolvers...))
-	b.dialOpts = append(b.dialOpts, grpc.WithDefaultServiceConfig(`{"loadBalancingConfig": [{"round_robin":{}}]}`))
+
+	switch opts.Dispatch {
+	case def.Random:
+		b.dialOpts = append(b.dialOpts, grpc.WithDefaultServiceConfig(`{"loadBalancingConfig": [{"random":{}}]}`))
+	case def.WeightedRoundRobin:
+		b.dialOpts = append(b.dialOpts, grpc.WithDefaultServiceConfig(`{"loadBalancingConfig": [{"wrr":{}}]}`))
+	case def.ConsistentHash:
+		b.dialOpts = append(b.dialOpts, grpc.WithDefaultServiceConfig(`{"loadBalancingConfig": [{"ch":{}}]}`))
+	default:
+		b.dialOpts = append(b.dialOpts, grpc.WithDefaultServiceConfig(`{"loadBalancingConfig": [{"round_robin":{}}]}`))
+	}
+
+	b.dialOpts = append(b.dialOpts, opts.DialOpts...)
 
 	if err := b.init(); err != nil {
+		b.cancel()
 		return &Builder{err: err}
 	}
 
 	return b
 }
 
+// init initializes service discovery by loading the initial instances and starting the instance
+// change watcher.
 func (b *Builder) init() error {
 	if b.opts.Discovery == nil {
 		return nil
@@ -104,39 +138,44 @@ func (b *Builder) init() error {
 }
 
 func (b *Builder) watch() {
-	var skipped bool
-
 	for {
 		select {
 		case <-b.ctx.Done():
 			return
 		default:
-			// exec watch
 		}
+
 		instances, err := b.watcher.Next()
 		if err != nil {
+			if errors.Is(err, errors.ErrWatcherStopped) {
+				return
+			}
+			time.Sleep(time.Second)
 			continue
 		}
 
-		if skipped {
-			b.updateInstances(instances)
-		} else {
-			skipped = true
-		}
+		b.updateInstances(instances)
 	}
 }
 
-// updateInstances 更新服务实例
+// updateInstances updates the service instances.
 func (b *Builder) updateInstances(instances []*registry.ServiceInstance) {
 	for _, r := range b.resolvers {
 		r.(iresolver.Builder).UpdateStates(instances)
 	}
 }
 
-// Build 构建连接
+// Build builds a connection.
+//
+// A connection for the same target is cached and reused, and singleflight prevents concurrent
+// duplicate connection attempts.
 func (b *Builder) Build(target string) (*grpc.ClientConn, error) {
 	if b.err != nil {
 		return nil, b.err
+	}
+
+	if b.closed.Load() {
+		return nil, errors.ErrClientClosed
 	}
 
 	if c, ok := b.connections.Load(target); ok {
@@ -144,12 +183,23 @@ func (b *Builder) Build(target string) (*grpc.ClientConn, error) {
 	}
 
 	c, err, _ := b.sfg.Do(target, func() (any, error) {
+		if b.closed.Load() {
+			return nil, errors.ErrClientClosed
+		}
+
 		cc, err := grpc.NewClient(target, b.dialOpts...)
 		if err != nil {
 			return nil, err
 		}
 
 		b.connections.Store(target, cc)
+
+		// Prevent storing an already-closed connection when Close and Build run concurrently.
+		if b.closed.Load() {
+			_ = cc.Close()
+			b.connections.Delete(target)
+			return nil, errors.ErrClientClosed
+		}
 
 		return cc, nil
 	})
@@ -158,4 +208,33 @@ func (b *Builder) Build(target string) (*grpc.ClientConn, error) {
 	}
 
 	return c.(*grpc.ClientConn), nil
+}
+
+// Close closes the builder and releases all connections and resources. It is idempotent.
+func (b *Builder) Close() error {
+	if !b.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+
+	// Notify the watch goroutine to exit.
+	if b.cancel != nil {
+		b.cancel()
+	}
+
+	// Stop the service discovery watcher, making Next return ErrWatcherStopped.
+	if b.watcher != nil {
+		_ = b.watcher.Stop()
+	}
+
+	// Close all connections and clear the cache.
+	var firstErr error
+	b.connections.Range(func(key, value any) bool {
+		if err := value.(*grpc.ClientConn).Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		b.connections.Delete(key)
+		return true
+	})
+
+	return firstErr
 }

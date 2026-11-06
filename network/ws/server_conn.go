@@ -1,124 +1,131 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/5/27 5:03 下午
- * @Desc: TODO
- */
-
 package ws
 
 import (
-	"context"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/dobyte/due/v2/core/buffer"
+	"github.com/dobyte/due/v2/core/queue"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/network"
 	"github.com/dobyte/due/v2/packet"
-	"github.com/dobyte/due/v2/utils/xcall"
+	taskpool "github.com/dobyte/due/v2/task"
 	"github.com/dobyte/due/v2/utils/xnet"
-	"github.com/dobyte/due/v2/utils/xtime"
 	"github.com/gorilla/websocket"
 )
 
 type serverConn struct {
-	id                int64           // 连接ID
-	uid               atomic.Int64    // 用户ID
-	attr              *attr           // 连接属性
-	state             atomic.Int32    // 连接状态
-	connMgr           *serverConnMgr  // 连接管理
-	rw                sync.RWMutex    // 锁
-	conn              *websocket.Conn // WS源连接
-	taskPool          sync.Pool       // 任务对象池
-	lowPriorityQueue  chan *task      // 低优先级队列
-	highPriorityQueue chan *task      // 高优先级队列
-	done              chan struct{}   // 写入完成信号
-	close             chan struct{}   // 关闭信号
-	lastHeartbeatTime atomic.Int64    // 上次心跳时间
-	authorizeTimer    atomic.Value    // 授权定时器
+	id                int64                       // Connection ID
+	uid               atomic.Int64                // User ID
+	attr              *attr                       // Connection attributes
+	state             atomic.Int32                // Connection state
+	connMgr           *serverConnMgr              // Connection manager
+	rw                sync.RWMutex                // Lock
+	wg1               sync.WaitGroup              // Read wait group, reused with the connection object pool
+	wg2               sync.WaitGroup              // Write wait group, reused with the connection object pool
+	conn              *websocket.Conn             // Underlying WS connection
+	remoteAddr        net.Addr                    // Real client address (resolved from the proxy headers in the application proxy mode)
+	queue             *queue.Queue[buffer.Buffer] // Message queue
+	lastHeartbeatTime atomic.Int64                // Time of the last received heartbeat
+	authorizeTimer    atomic.Pointer[time.Timer]  // Authorization timer
 }
 
 var _ network.Conn = &serverConn{}
 
-// ID 获取连接ID
+// ID returns the connection ID.
 func (c *serverConn) ID() int64 {
 	return c.id
 }
 
-// UID 获取用户ID
+// UID returns the user ID.
 func (c *serverConn) UID() int64 {
 	return c.uid.Load()
 }
 
-// Attr 获取属性接口
+// Attr returns the attribute interface of the connection.
 func (c *serverConn) Attr() network.Attr {
 	return c.attr
 }
 
-// Bind 绑定用户ID
-func (c *serverConn) Bind(uid int64) {
+// Bind binds the connection to the given user ID.
+func (c *serverConn) Bind(uid int64) error {
+	c.rw.RLock()
+
+	if c.isClosed() {
+		c.rw.RUnlock()
+		return errors.ErrConnectionClosed
+	}
+
 	c.uid.Store(uid)
-
 	c.uncheckAuthorize()
+
+	c.rw.RUnlock()
+
+	return nil
 }
 
-// Unbind 解绑用户ID
-func (c *serverConn) Unbind() {
+// Unbind unbinds the user ID from the connection.
+func (c *serverConn) Unbind() error {
+	c.rw.RLock()
+
+	if c.isClosed() {
+		c.rw.RUnlock()
+		return errors.ErrConnectionClosed
+	}
+
 	c.uid.Store(0)
+	c.checkAuthorize(c.conn)
 
-	c.checkAuthorize()
+	c.rw.RUnlock()
+
+	return nil
 }
 
-// Send 发送消息（同步）
-func (c *serverConn) Send(msg []byte) (err error) {
-	if err := c.checkState(); err != nil {
-		return err
+// Push sends a message.
+//
+// The caller controls when buf is released when the send fails.
+func (c *serverConn) Push(buf buffer.Buffer) error {
+	if buf.Len() == 0 {
+		return errors.ErrInvalidMessage
 	}
 
 	c.rw.RLock()
-	defer c.rw.RUnlock()
 
-	if c.conn == nil {
-		return errors.ErrConnectionClosed
-	}
-
-	return c.doWriteToQueue(c.highPriorityQueue, dataPacket, msg)
-}
-
-// Push 发送消息（异步）
-func (c *serverConn) Push(msg []byte) error {
 	if err := c.checkState(); err != nil {
+		c.rw.RUnlock()
 		return err
 	}
 
-	c.rw.RLock()
-	defer c.rw.RUnlock()
+	err := c.queue.Write(buf)
 
-	if c.conn == nil {
-		return errors.ErrConnectionClosed
-	}
+	c.rw.RUnlock()
 
-	return c.doWriteToQueue(c.lowPriorityQueue, dataPacket, msg)
+	return err
 }
 
-// State 获取连接状态
+// State returns the connection state.
 func (c *serverConn) State() network.ConnState {
 	return network.ConnState(c.state.Load())
 }
 
-// Close 关闭连接
+// Close closes the connection.
+//
+// After the connection is closed the connection object is recycled and reused, so none of its
+// methods or attributes may be used again (the identity may drift). When force is true the
+// connection is closed forcibly.
 func (c *serverConn) Close(force ...bool) error {
 	if len(force) > 0 && force[0] {
-		return c.forceClose(true)
+		return c.forceClose()
 	} else {
-		return c.graceClose(true)
+		return c.graceClose()
 	}
 }
 
-// LocalIP 获取本地IP
+// LocalIP returns the local IP address.
 func (c *serverConn) LocalIP() (string, error) {
 	addr, err := c.LocalAddr()
 	if err != nil {
@@ -128,24 +135,22 @@ func (c *serverConn) LocalIP() (string, error) {
 	return xnet.ExtractIP(addr)
 }
 
-// LocalAddr 获取本地地址
+// LocalAddr returns the local address.
 func (c *serverConn) LocalAddr() (net.Addr, error) {
-	if err := c.checkState(); err != nil {
-		return nil, err
-	}
-
 	c.rw.RLock()
-	conn := c.conn
-	c.rw.RUnlock()
 
-	if conn == nil {
+	if c.isClosed() {
+		c.rw.RUnlock()
 		return nil, errors.ErrConnectionClosed
 	}
+
+	conn := c.conn
+	c.rw.RUnlock()
 
 	return conn.LocalAddr(), nil
 }
 
-// RemoteIP 获取远端IP
+// RemoteIP returns the remote IP address.
 func (c *serverConn) RemoteIP() (string, error) {
 	addr, err := c.RemoteAddr()
 	if err != nil {
@@ -155,55 +160,94 @@ func (c *serverConn) RemoteIP() (string, error) {
 	return xnet.ExtractIP(addr)
 }
 
-// RemoteAddr 获取远端地址
+// RemoteAddr returns the remote address.
+//
+// It returns the real client address resolved from the proxy headers when available, and the
+// remote address of the underlying connection otherwise.
 func (c *serverConn) RemoteAddr() (net.Addr, error) {
-	if err := c.checkState(); err != nil {
-		return nil, err
+	c.rw.RLock()
+
+	if c.isClosed() {
+		c.rw.RUnlock()
+		return nil, errors.ErrConnectionClosed
 	}
 
-	c.rw.RLock()
 	conn := c.conn
+	remoteAddr := c.remoteAddr
 	c.rw.RUnlock()
 
-	if conn == nil {
-		return nil, errors.ErrConnectionClosed
+	if remoteAddr != nil {
+		return remoteAddr, nil
 	}
 
 	return conn.RemoteAddr(), nil
 }
 
-// 初始化连接
-func (c *serverConn) init(cm *serverConnMgr, id int64, conn *websocket.Conn) {
-	c.id = id
+// init initializes the connection.
+//
+// It reuses a connection object from the object pool and, under the write lock, resets the state,
+// stores the connection in a partition and starts the read and write goroutines. The close path and
+// the delayed close tasks of the previous life cycle both need the lock, so they block until
+// initialization completes, which prevents the connection object from being recycled before the
+// goroutines start. When a partition refuses the store while the server is closing, initialization
+// aborts and the caller returns the connection object to the object pool and closes the underlying
+// connection. remoteAddr is the real client address and may be nil.
+func (c *serverConn) init(conn *websocket.Conn, remoteAddr net.Addr) bool {
+	c.rw.Lock()
+
+	c.id = c.connMgr.cid.Add(1)
 	c.uid.Store(0)
-	c.attr = &attr{}
+	c.attr.values.Clear()
 	c.state.Store(int32(network.ConnOpened))
 	c.conn = conn
-	c.connMgr = cm
-	c.lowPriorityQueue = make(chan *task, c.connMgr.server.opts.writeQueueSize)
-	c.highPriorityQueue = make(chan *task, c.connMgr.server.opts.writeQueueSize)
-	c.done = make(chan struct{})
-	c.close = make(chan struct{})
-	c.lastHeartbeatTime.Store(xtime.Now().UnixNano())
-	c.authorizeTimer.Store((*time.Timer)(nil))
+	c.remoteAddr = remoteAddr
+	c.queue = queue.NewQueue[buffer.Buffer](int32(max(minWriteQueueSize, c.connMgr.server.opts.writeQueueSize)), c.connMgr.server.opts.writeTimeout)
+	c.lastHeartbeatTime.Store(time.Now().UnixNano())
+	c.authorizeTimer.Store(nil)
 
-	xcall.Go(c.read)
+	if !c.connMgr.storeConn(conn, c) {
+		// The partition has stopped accepting connections, so reset the state and clear the references before aborting initialization.
+		c.state.Store(int32(network.ConnClosed))
+		c.conn = nil
+		c.remoteAddr = nil
+		c.queue = nil
+		c.rw.Unlock()
+		return false
+	}
 
-	xcall.Go(c.write)
+	c.wg1.Go(func() { c.read(conn) })
+	c.wg2.Go(func() { c.write(conn) })
 
-	c.checkAuthorize()
+	c.rw.Unlock()
+
+	// The connection may have been closed concurrently before initialization completes, so run the authorization check and the connect hook only while it is still opened.
+	if c.State() != network.ConnOpened {
+		return true
+	}
+
+	c.checkAuthorize(conn)
 
 	if c.connMgr.server.connectHandler != nil {
 		c.connMgr.server.connectHandler(c)
 	}
+
+	return true
 }
 
-// 重置连接
+// reset resets the connection.
+//
+// It clears the references and state held by the connection object so that it can be safely reused
+// after being returned to the object pool, and explicitly stops the remaining authorization timer
+// so that its callback does not fire after the connection is reused.
 func (c *serverConn) reset() {
-	c.attr = nil
+	c.remoteAddr = nil
+	c.queue = nil
+	c.attr.values.Clear()
+	c.uncheckAuthorize()
 }
 
-// 检测连接状态
+// checkState checks the connection state. It returns the matching error for the hanged or closed
+// state, and nil when the connection is normal.
 func (c *serverConn) checkState() error {
 	switch c.State() {
 	case network.ConnHanged:
@@ -215,35 +259,46 @@ func (c *serverConn) checkState() error {
 	}
 }
 
-// 授权检查
-func (c *serverConn) checkAuthorize() {
+// checkAuthorize performs the authorization check.
+//
+// It starts the authorization timeout timer and closes the connection when the timeout elapses
+// while no user ID has been bound. The timer callback compares both the connection ID and the
+// connection pointer so that a recycled connection is not closed by mistake.
+func (c *serverConn) checkAuthorize(conn *websocket.Conn) {
 	if c.connMgr.server.opts.authorizeTimeout > 0 {
-		timer := c.authorizeTimer.Swap(time.AfterFunc(c.connMgr.server.opts.authorizeTimeout, func() {
+		id := c.id
+
+		if timer := c.authorizeTimer.Swap(time.AfterFunc(c.connMgr.server.opts.authorizeTimeout, func() {
 			if c.UID() != 0 {
 				return
 			}
 
-			c.forceClose(true)
-		}))
-		if t, ok := timer.(*time.Timer); ok && t != nil {
-			t.Stop()
+			c.recycleClose(conn, id)
+		})); timer != nil {
+			timer.Stop()
 		}
 	}
 }
 
-// 取消授权检查
+// uncheckAuthorize cancels the authorization check.
+//
+// It stops the authorization timeout timer and is used to end the authorization check when a user
+// ID is bound or the connection is closed.
 func (c *serverConn) uncheckAuthorize() {
 	if c.connMgr.server.opts.authorizeTimeout > 0 {
-		timer := c.authorizeTimer.Swap((*time.Timer)(nil))
-
-		if t, ok := timer.(*time.Timer); ok && t != nil {
-			t.Stop()
+		if timer := c.authorizeTimer.Swap(nil); timer != nil {
+			timer.Stop()
 		}
 	}
 }
 
-// 优雅关闭
-func (c *serverConn) graceClose(isNeedRecycle bool) error {
+// graceClose closes the connection gracefully.
+//
+// It writes a close signal and waits for the write queue to drain before closing the connection, so
+// that buffered messages can be delivered as far as possible. When a graceful close timeout is
+// configured, the underlying connection is closed once the timeout elapses before the queue drains,
+// which forces the wait to end.
+func (c *serverConn) graceClose() error {
 	if !c.state.CompareAndSwap(int32(network.ConnOpened), int32(network.ConnHanged)) {
 		return errors.ErrConnectionNotOpened
 	}
@@ -255,156 +310,218 @@ func (c *serverConn) graceClose(isNeedRecycle bool) error {
 		c.rw.RUnlock()
 		return errors.ErrConnectionClosed
 	}
-	c.lowPriorityQueue <- &task{typ: closeSig}
+	conn := c.conn
+	q := c.queue
+	err := q.Write(buffer.NewBytes(nil))
 	c.rw.RUnlock()
 
-	<-c.done
-
-	if !c.state.CompareAndSwap(int32(network.ConnHanged), int32(network.ConnClosed)) {
-		return errors.ErrConnectionNotHanged
+	if err == nil {
+		if closeTimeout := c.connMgr.server.opts.closeTimeout; closeTimeout > 0 {
+			// Close the underlying connection once the drain times out to interrupt a possibly blocking write in the write goroutine.
+			timer := time.AfterFunc(closeTimeout, func() { _ = conn.Close() })
+			q.Wait()
+			timer.Stop()
+		} else {
+			q.Wait()
+		}
 	}
 
-	return c.doClose(isNeedRecycle)
+	if c.state.Swap(int32(network.ConnClosed)) == int32(network.ConnClosed) {
+		return errors.ErrConnectionClosed
+	}
+
+	return c.doClose()
 }
 
-// 强制关闭
-func (c *serverConn) forceClose(isNeedRecycle bool) error {
-	if !c.state.CompareAndSwap(int32(network.ConnOpened), int32(network.ConnClosed)) {
-		if !c.state.CompareAndSwap(int32(network.ConnHanged), int32(network.ConnClosed)) {
-			return errors.ErrConnectionClosed
-		}
+// forceClose closes the connection forcibly.
+//
+// It immediately switches the state to closed and closes the connection without waiting for the
+// write queue to drain.
+func (c *serverConn) forceClose() error {
+	if c.state.Swap(int32(network.ConnClosed)) == int32(network.ConnClosed) {
+		return errors.ErrConnectionClosed
 	}
 
 	c.uncheckAuthorize()
 
-	return c.doClose(isNeedRecycle)
+	return c.doClose(true)
 }
 
-// 执行关闭操作
-func (c *serverConn) doClose(isNeedRecycle bool) error {
+// doClose performs the close.
+//
+// It closes the write queue, waits for the read and write goroutines to exit, closes the WS
+// connection, invokes the disconnect handler and returns the connection object to the connection
+// pool. When force is true it closes the WS connection first so that a possibly blocking write in
+// the write goroutine is interrupted, preserving the force-close semantics.
+func (c *serverConn) doClose(force ...bool) error {
 	c.rw.Lock()
-
 	if c.conn == nil {
 		c.rw.Unlock()
 		return errors.ErrConnectionClosed
 	}
 
-	close(c.lowPriorityQueue)
-	close(c.highPriorityQueue)
-	close(c.close)
-	close(c.done)
+	c.queue.Close()
 	conn := c.conn
 	c.conn = nil
-
 	c.rw.Unlock()
 
-	err := conn.Close()
+	var err error
+
+	if len(force) > 0 && force[0] {
+		err = conn.Close()
+		c.wg2.Wait()
+	} else {
+		c.wg2.Wait()
+		err = conn.Close()
+	}
+
+	c.wg1.Wait()
+
+	for buf := range c.queue.Read() {
+		buf.Release()
+	}
 
 	if c.connMgr.server.disconnectHandler != nil {
 		c.connMgr.server.disconnectHandler(c)
 	}
 
-	if isNeedRecycle {
-		c.connMgr.recycle(conn)
-	}
+	c.connMgr.recycleConn(conn)
 
 	return err
 }
 
-// 读取消息
-func (c *serverConn) read() {
-	conn := c.conn
+// recycleClose forcibly closes the connection when it is still the given connection.
+//
+// The read and write goroutines close the connection asynchronously through the task pool on their
+// error paths. By the time the closure runs the connection object may have been recycled and the
+// address of the WS connection may have been reused by the runtime, so both the connection ID and
+// the WS connection pointer must match to avoid closing a new connection by mistake.
+func (c *serverConn) recycleClose(conn *websocket.Conn, id int64) {
+	c.rw.RLock()
+	match := c.id == id && c.conn == conn
+	c.rw.RUnlock()
+
+	if match {
+		c.forceClose()
+	}
+}
+
+// read reads messages.
+//
+// It keeps reading messages, updates the heartbeat time, detects empty and heartbeat packets and
+// dispatches them to the receive handler. A read failure triggers a force close.
+func (c *serverConn) read(conn *websocket.Conn) {
+	var (
+		index = 0
+		id    = c.id
+	)
 
 	for {
-		select {
-		case <-c.close:
-			return
-		default:
-			msgType, msgData, err := conn.ReadMessage()
-			if err != nil {
-				if !errors.Is(err, net.ErrClosed) {
-					if _, ok := err.(*websocket.CloseError); !ok {
-						log.Warnf("read message failed: %d %v", c.id, err)
-					}
+		mt, r, err := conn.NextReader()
+		if err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				if _, ok := err.(*websocket.CloseError); !ok {
+					log.Warnf("read message failed: %d %v", c.id, err)
 				}
-				_ = c.forceClose(true)
+			}
+
+			taskpool.Add(func() { c.recycleClose(conn, id) })
+			return
+		}
+
+		if mt != websocket.BinaryMessage {
+			_, _ = io.Copy(io.Discard, r)
+			continue
+		}
+
+		frameType, heartbeatTime, buf, err := packet.Read(r)
+		if err != nil {
+			taskpool.Add(func() { c.recycleClose(conn, id) })
+			return
+		}
+
+		switch c.State() {
+		case network.ConnClosed:
+			if frameType != packet.FrameHeartbeat {
+				buf.Release()
+			}
+			return
+		case network.ConnHanged:
+			if frameType != packet.FrameHeartbeat {
+				buf.Release()
 				return
 			}
+		}
 
-			if msgType != websocket.BinaryMessage {
-				continue
-			}
-
+		if frameType == packet.FrameHeartbeat {
+			// update heartbeat time
 			if c.connMgr.server.opts.heartbeatInterval > 0 {
-				c.lastHeartbeatTime.Store(xtime.Now().UnixNano())
+				c.lastHeartbeatTime.Store(time.Now().UnixNano())
 			}
 
-			switch c.State() {
-			case network.ConnHanged:
-				continue
-			case network.ConnClosed:
-				return
-			default:
-				// ignore
+			// responsive heartbeat
+			if c.connMgr.server.opts.heartbeatMechanism == RespHeartbeat {
+				hb := packet.PackHeartbeat(true)
+
+				c.rw.RLock()
+				err := c.queue.Write(hb)
+				c.rw.RUnlock()
+
+				if err != nil {
+					hb.Release()
+				}
+			}
+
+			// trigger heartbeat handler, heartbeat time is not nil
+			if c.connMgr.server.heartbeatHandler != nil {
+				c.connMgr.server.heartbeatHandler(c, heartbeatTime)
+			}
+		} else {
+			// update heartbeat time
+			if c.connMgr.server.opts.heartbeatInterval > 0 {
+				index++
+
+				if index%10 == 0 {
+					c.lastHeartbeatTime.Store(time.Now().UnixNano())
+				}
 			}
 
 			// ignore empty packet
-			if len(msgData) == 0 {
+			if buf.Len() == 0 {
+				buf.Release()
 				continue
 			}
 
-			// check heartbeat packet
-			isHeartbeat, err := packet.CheckHeartbeat(msgData)
-			if err != nil {
-				log.Errorf("check heartbeat message error: %v", err)
-				continue
-			}
-
-			// ignore heartbeat packet
-			if isHeartbeat {
-				// responsive heartbeat
-				if c.connMgr.server.opts.heartbeatMechanism == RespHeartbeat {
-					c.rw.RLock()
-					if c.conn != nil {
-						c.doWriteToQueue(c.highPriorityQueue, heartbeatPacket)
-					}
-					c.rw.RUnlock()
-				}
+			if frameType == packet.FrameHandshake && c.connMgr.server.handshakeHandler != nil {
+				c.connMgr.server.handshakeHandler(c, buf)
+			} else if c.connMgr.server.receiveHandler != nil {
+				c.connMgr.server.receiveHandler(c, buf)
 			} else {
-				if c.connMgr.server.receiveHandler != nil {
-					c.connMgr.server.receiveHandler(c, msgData)
-				}
+				buf.Release()
 			}
 		}
 	}
 }
 
-// 写入消息
-// 由于gorilla/websocket库并发写入的限制，同时为了保证心跳能够优先下发到客户端，故而实现一个优先队列
-func (c *serverConn) write() {
-	var (
-		conn   = c.conn
-		ticker *time.Ticker
-	)
+// write writes messages.
+func (c *serverConn) write(conn *websocket.Conn) {
+	var tickerC <-chan time.Time
 
 	if c.connMgr.server.opts.heartbeatInterval > 0 {
-		ticker = time.NewTicker(c.connMgr.server.opts.heartbeatInterval)
+		ticker := time.NewTicker(c.connMgr.server.opts.heartbeatInterval)
 		defer ticker.Stop()
-	} else {
-		ticker = &time.Ticker{C: make(chan time.Time, 1)}
+		tickerC = ticker.C
 	}
 
 	for {
 		select {
-		case t, ok := <-c.highPriorityQueue:
+		case buf, ok := <-c.queue.Read():
 			if !ok {
 				return
 			}
 
-			if !c.doWrite(conn, t) {
-				return
-			}
-		case t, ok := <-ticker.C:
+			c.doWrite(conn, buf)
+		case t, ok := <-tickerC:
 			if !ok {
 				return
 			}
@@ -412,135 +529,77 @@ func (c *serverConn) write() {
 			if !c.doHandleHeartbeat(conn, t) {
 				return
 			}
-		default:
-			select {
-			case t, ok := <-c.highPriorityQueue:
-				if !ok {
-					return
-				}
-
-				if !c.doWrite(conn, t) {
-					return
-				}
-			case t, ok := <-c.lowPriorityQueue:
-				if !ok {
-					return
-				}
-
-				if !c.doWrite(conn, t) {
-					return
-				}
-			case t, ok := <-ticker.C:
-				if !ok {
-					return
-				}
-
-				if !c.doHandleHeartbeat(conn, t) {
-					return
-				}
-			}
 		}
 	}
 }
 
-// 执行写入操作
-func (c *serverConn) doWrite(conn *websocket.Conn, t *task) bool {
-	defer c.doRecycleToPool(t)
+// doWrite performs a write.
+//
+// It terminates the write goroutine after recognizing the close signal, and otherwise writes the
+// message data and releases the buffer.
+func (c *serverConn) doWrite(conn *websocket.Conn, buf buffer.Buffer) {
+	closeSig := buf.Len() == 0
 
-	if t.typ == closeSig {
-		c.rw.RLock()
-		if c.conn != nil {
-			c.done <- struct{}{}
-		}
-		c.rw.RUnlock()
-		return false
+	c.queue.Done(closeSig)
+
+	if closeSig {
+		buf.Release()
+		return
 	}
 
-	if c.isClosed() {
-		return false
+	if c.connMgr.server.opts.writeTimeout > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(c.connMgr.server.opts.writeTimeout))
 	}
 
-	if t.typ == heartbeatPacket {
-		if msg, err := packet.PackHeartbeat(); err != nil {
-			log.Errorf("pack heartbeat message error: %v", err)
-			return true
-		} else {
-			t.msg = msg
-		}
-	}
+	if err := writeBuffer(conn, buf); err != nil {
+		if _, ok := err.(*websocket.CloseError); !ok {
+			if !errors.Is(err, net.ErrClosed) {
+				log.Warnf("write message error: %v", err)
 
-	if err := conn.WriteMessage(websocket.BinaryMessage, t.msg); err != nil {
-		if !errors.Is(err, net.ErrClosed) {
-			if _, ok := err.(*websocket.CloseError); !ok {
-				log.Errorf("write message error: %v", err)
+				id := c.id
+
+				taskpool.Add(func() { c.recycleClose(conn, id) })
 			}
 		}
 	}
 
-	return true
+	buf.Release()
 }
 
-// 处理心跳
+// doHandleHeartbeat handles heartbeats.
+//
+// It checks whether the time of the last received message has timed out and triggers a force close
+// if so; in the active tick heartbeat mode it also sends a heartbeat packet. It returns false when
+// the write goroutine should stop because the heartbeat timed out.
 func (c *serverConn) doHandleHeartbeat(conn *websocket.Conn, t time.Time) bool {
-	deadline := t.Add(-2 * c.connMgr.server.opts.heartbeatInterval).UnixNano()
-
-	if c.lastHeartbeatTime.Load() < deadline {
+	if c.lastHeartbeatTime.Load() < t.Add(-2*c.connMgr.server.opts.heartbeatInterval).UnixNano() {
 		log.Debugf("connection heartbeat timeout, cid: %d", c.id)
-		_ = c.forceClose(true)
+
+		id := c.id
+
+		taskpool.Add(func() { c.recycleClose(conn, id) })
+
 		return false
 	} else {
 		if c.connMgr.server.opts.heartbeatMechanism == TickHeartbeat {
-			if c.isClosed() {
-				return false
+			if c.connMgr.server.opts.writeTimeout > 0 {
+				_ = conn.SetWriteDeadline(time.Now().Add(c.connMgr.server.opts.writeTimeout))
 			}
 
-			if heartbeat, err := packet.PackHeartbeat(); err != nil {
-				log.Errorf("pack heartbeat message error: %v", err)
-			} else {
-				// send heartbeat packet
-				if err := conn.WriteMessage(websocket.BinaryMessage, heartbeat); err != nil {
-					log.Errorf("write heartbeat message error: %v", err)
-				}
+			hb := packet.PackHeartbeat(true)
+
+			if err := conn.WriteMessage(websocket.BinaryMessage, hb.Bytes()); err != nil {
+				log.Warnf("write heartbeat message error: %v", err)
 			}
+
+			hb.Release()
 		}
-	}
 
-	return true
+		return true
+	}
 }
 
-// 是否已关闭
+// isClosed reports whether the connection state is closed.
 func (c *serverConn) isClosed() bool {
 	return c.State() == network.ConnClosed
-}
-
-// 回收任务到对象池
-func (c *serverConn) doRecycleToPool(t *task) {
-	t.msg = nil
-	c.taskPool.Put(t)
-}
-
-// 写入任务到队列
-func (c *serverConn) doWriteToQueue(queue chan *task, typ int8, msg ...[]byte) error {
-	t := c.taskPool.Get().(*task)
-	t.typ = typ
-	if len(msg) > 0 {
-		t.msg = msg[0]
-	}
-
-	if c.connMgr.server.opts.writeTimeout > 0 && len(queue) == cap(queue) {
-		ctx, cancel := context.WithTimeout(context.Background(), c.connMgr.server.opts.writeTimeout)
-		defer cancel()
-
-		select {
-		case <-ctx.Done():
-			c.doRecycleToPool(t)
-			return ctx.Err()
-		case queue <- t:
-			return nil
-		}
-	}
-
-	queue <- t
-
-	return nil
 }

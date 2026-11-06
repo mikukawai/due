@@ -2,86 +2,74 @@ package protocol
 
 import (
 	"encoding/binary"
-	"io"
 
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/internal/transporter/internal/codes"
+	"github.com/dobyte/due/v2/internal/transporter/internal/def"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
 )
 
 const (
-	publishReqBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + b8
-	publishResBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + defaultCodeBytes + b64
+	publishReqBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.B8 + def.B8
+	publishResBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.CodeBytes + def.B64
 )
 
-// EncodePublishReq 编码发布频道消息请求
-// 协议：size + header + route + seq + channel len + channel + <message packet>
+// EncodePublishReq encodes a publish request.
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {channel len + channel + disconnect + <message packet>}
 func EncodePublishReq(seq uint64, channel string, disconnect bool, message buffer.Buffer) *buffer.NocopyBuffer {
 	channelBytes := len([]byte(channel))
 	size := publishReqBytes + channelBytes
 
 	writer := buffer.MallocWriter(size)
-	writer.WriteUint32s(binary.BigEndian, uint32(size-defaultSizeBytes+message.Len()))
-	if disconnect {
-		writer.WriteUint8s(dataBit | disconnectBit)
-	} else {
-		writer.WriteUint8s(dataBit)
-	}
+	writer.WriteUint32s(binary.BigEndian, uint32(size-def.SizeBytes+message.Len()))
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Publish)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint8s(uint8(channelBytes))
 	writer.WriteString(channel)
+	writer.WriteBools(disconnect)
 
 	return buffer.NewNocopyBuffer(writer, message)
 }
 
-// DecodePublishReq 解码发布频道消息请求
-// 协议：size + header + route + seq + channel len + channel + <message packet>
-func DecodePublishReq(data []byte) (seq uint64, channel string, disconnect bool, message []byte, err error) {
-	reader := buffer.NewReader(data)
+// DecodePublishReq decodes a publish request.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {channel len + channel + disconnect + <message packet>}
+func DecodePublishReq(req *buffer.Bytes) (string, bool, *buffer.Bytes, error) {
+	data := req.Bytes()
 
-	if _, err = reader.Seek(defaultSizeBytes, io.SeekStart); err != nil {
-		return
+	if len(data) < def.B8 {
+		return "", false, nil, errors.ErrInvalidMessage
 	}
 
-	var k uint8
-
-	if k, err = reader.ReadUint8(); err != nil {
-		return
-	} else {
-		disconnect = k&disconnectBit == disconnectBit
+	channelBytes := int(data[0])
+	offset := def.B8 + channelBytes + def.B8
+	if len(data) < offset {
+		return "", false, nil, errors.ErrInvalidMessage
 	}
 
-	if _, err = reader.Seek(defaultRouteBytes, io.SeekCurrent); err != nil {
-		return
-	}
+	channel := string(data[def.B8 : def.B8+channelBytes])
+	disconnect := data[def.B8+channelBytes] == 1
 
-	if seq, err = reader.ReadUint64(binary.BigEndian); err != nil {
-		return
-	}
+	req.Slide(offset)
 
-	var channelBytes uint8
-
-	if channelBytes, err = reader.ReadUint8(); err != nil {
-		return
-	}
-
-	if channel, err = reader.ReadString(int(channelBytes)); err != nil {
-		return
-	}
-
-	message = data[publishReqBytes+channelBytes:]
-
-	return
+	return channel, disconnect, req, nil
 }
 
-// EncodePublishRes 编码发布频道消息响应
-// 协议：size + header + route + seq + code + [total]
+// EncodePublishRes encodes a publish response.
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {code + [total]}
 func EncodePublishRes(seq uint64, code uint16, total ...uint64) *buffer.NocopyBuffer {
+	size := publishResBytes - def.SizeBytes
+	if code != codes.OK || len(total) == 0 || total[0] == 0 {
+		size -= def.B64
+	}
+
 	writer := buffer.MallocWriter(publishResBytes)
-	writer.WriteUint32s(binary.BigEndian, uint32(publishResBytes-defaultSizeBytes))
-	writer.WriteUint8s(dataBit)
+	writer.WriteUint32s(binary.BigEndian, uint32(size))
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Publish)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint16s(binary.BigEndian, code)
@@ -93,26 +81,20 @@ func EncodePublishRes(seq uint64, code uint16, total ...uint64) *buffer.NocopyBu
 	return buffer.NewNocopyBuffer(writer)
 }
 
-// DecodeMulticastRes 解码组播响应
-// 协议：size + header + route + seq + code + [total]
-func DecodePublishRes(data []byte) (code uint16, total uint64, err error) {
-	if len(data) != publishResBytes && len(data) != publishResBytes-b64 {
+// DecodePublishRes decodes a publish response.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {code + [total]}
+func DecodePublishRes(buf buffer.Buffer) (code uint16, total uint64, err error) {
+	if buf.Len() != def.CodeBytes && buf.Len() != def.CodeBytes+def.B64 {
 		err = errors.ErrInvalidMessage
 		return
 	}
 
-	reader := buffer.NewReader(data)
+	data := buf.Bytes()
+	code = binary.BigEndian.Uint16(data[:def.CodeBytes])
 
-	if _, err = reader.Seek(defaultSizeBytes+defaultHeaderBytes+defaultRouteBytes+defaultSeqBytes, io.SeekStart); err != nil {
-		return
-	}
-
-	if code, err = reader.ReadUint16(binary.BigEndian); err != nil {
-		return
-	}
-
-	if code == codes.OK && len(data) == publishResBytes {
-		total, err = reader.ReadUint64(binary.BigEndian)
+	if code == codes.OK && buf.Len() == def.CodeBytes+def.B64 {
+		total = binary.BigEndian.Uint64(data[def.CodeBytes:])
 	}
 
 	return

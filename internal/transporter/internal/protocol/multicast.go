@@ -2,97 +2,81 @@ package protocol
 
 import (
 	"encoding/binary"
-	"io"
 
+	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/internal/transporter/internal/codes"
+	"github.com/dobyte/due/v2/internal/transporter/internal/def"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
-	"github.com/dobyte/due/v2/session"
 )
 
 const (
-	multicastReqBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + b8 + b16
-	multicastResBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + defaultCodeBytes + b64
+	multicastReqBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.B8 + def.B16 + def.B8
+	multicastResBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.CodeBytes + def.B64
 )
 
-// EncodeMulticastReq 编码组播请求（最多组播65535个对象）
-// 协议：size + header + route + seq + session kind + count + targets + <message packet>
-func EncodeMulticastReq(seq uint64, kind session.Kind, targets []int64, disconnect bool, message buffer.Buffer) *buffer.NocopyBuffer {
-	size := multicastReqBytes + len(targets)*8
+// EncodeMulticastReq encodes a multicast request (at most 65535 targets).
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {session kind + count + targets + disconnect + <message packet>}
+func EncodeMulticastReq(seq uint64, kind cluster.Session, targets []int64, disconnect bool, message buffer.Buffer) *buffer.NocopyBuffer {
+	size := multicastReqBytes + len(targets)*def.B64
 
 	writer := buffer.MallocWriter(size)
-	writer.WriteUint32s(binary.BigEndian, uint32(size-defaultSizeBytes+message.Len()))
-	if disconnect {
-		writer.WriteUint8s(dataBit | disconnectBit)
-	} else {
-		writer.WriteUint8s(dataBit)
-	}
+	writer.WriteUint32s(binary.BigEndian, uint32(size-def.SizeBytes+message.Len()))
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Multicast)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint8s(uint8(kind))
 	writer.WriteUint16s(binary.BigEndian, uint16(len(targets)))
 	writer.WriteInt64s(binary.BigEndian, targets...)
+	writer.WriteBools(disconnect)
 
 	return buffer.NewNocopyBuffer(writer, message)
 }
 
-// DecodeMulticastReq 解码组播请求
-// 协议：size + header + route + seq + session kind + count + targets + <message packet>
-func DecodeMulticastReq(data []byte) (seq uint64, kind session.Kind, targets []int64, disconnect bool, message []byte, err error) {
-	reader := buffer.NewReader(data)
-
-	if _, err = reader.Seek(defaultSizeBytes, io.SeekStart); err != nil {
-		return
+// DecodeMulticastReq decodes a multicast request.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {session kind + count + targets + disconnect + <message packet>}
+func DecodeMulticastReq(req *buffer.Bytes) (cluster.Session, []int64, bool, *buffer.Bytes, error) {
+	if req.Len() < def.B8+def.B16+def.B8 {
+		return 0, nil, false, nil, errors.ErrInvalidMessage
 	}
 
-	var k uint8
+	data := req.Bytes()
+	kind := cluster.Session(data[0])
+	count := int(binary.BigEndian.Uint16(data[def.B8 : def.B8+def.B16]))
 
-	if k, err = reader.ReadUint8(); err != nil {
-		return
-	} else {
-		disconnect = k&disconnectBit == disconnectBit
+	offset := def.B8 + def.B16 + count*def.B64
+	if req.Len() < offset+def.B8 {
+		return 0, nil, false, nil, errors.ErrInvalidMessage
 	}
 
-	if _, err = reader.Seek(defaultRouteBytes, io.SeekCurrent); err != nil {
-		return
+	targets := make([]int64, count)
+	for i := range count {
+		start := def.B8 + def.B16 + i*def.B64
+		targets[i] = int64(binary.BigEndian.Uint64(data[start : start+def.B64]))
 	}
 
-	if seq, err = reader.ReadUint64(binary.BigEndian); err != nil {
-		return
-	}
+	disconnect := data[offset] == 1
 
-	if k, err = reader.ReadUint8(); err != nil {
-		return
-	} else {
-		kind = session.Kind(k)
-	}
+	req.Slide(offset + def.B8)
 
-	count, err := reader.ReadUint16(binary.BigEndian)
-	if err != nil {
-		return
-	}
-
-	if targets, err = reader.ReadInt64s(binary.BigEndian, int(count)); err != nil {
-		return
-	}
-
-	message = data[multicastReqBytes+8*count:]
-
-	return
+	return kind, targets, disconnect, req, nil
 }
 
-// EncodeMulticastRes 编码组播响应
-// 协议：size + header + route + seq + code + [total]
+// EncodeMulticastRes encodes a multicast response.
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {code + [total]}
 func EncodeMulticastRes(seq uint64, code uint16, total ...uint64) *buffer.NocopyBuffer {
-	size := multicastResBytes - defaultSizeBytes
+	size := multicastResBytes - def.SizeBytes
 	if code != codes.OK || len(total) == 0 || total[0] == 0 {
-		size -= b64
+		size -= def.B64
 	}
 
 	writer := buffer.MallocWriter(multicastResBytes)
 	writer.WriteUint32s(binary.BigEndian, uint32(size))
-	writer.WriteUint8s(dataBit)
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Multicast)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint16s(binary.BigEndian, code)
@@ -104,26 +88,20 @@ func EncodeMulticastRes(seq uint64, code uint16, total ...uint64) *buffer.Nocopy
 	return buffer.NewNocopyBuffer(writer)
 }
 
-// DecodeMulticastRes 解码组播响应
-// 协议：size + header + route + seq + code + [total]
-func DecodeMulticastRes(data []byte) (code uint16, total uint64, err error) {
-	if len(data) != multicastResBytes && len(data) != multicastResBytes-b64 {
+// DecodeMulticastRes decodes a multicast response.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {code + [total]}
+func DecodeMulticastRes(buf buffer.Buffer) (code uint16, total uint64, err error) {
+	if buf.Len() != def.CodeBytes && buf.Len() != def.CodeBytes+def.B64 {
 		err = errors.ErrInvalidMessage
 		return
 	}
 
-	reader := buffer.NewReader(data)
+	data := buf.Bytes()
+	code = binary.BigEndian.Uint16(data[:def.CodeBytes])
 
-	if _, err = reader.Seek(defaultSizeBytes+defaultHeaderBytes+defaultRouteBytes+defaultSeqBytes, io.SeekStart); err != nil {
-		return
-	}
-
-	if code, err = reader.ReadUint16(binary.BigEndian); err != nil {
-		return
-	}
-
-	if code == codes.OK && len(data) == multicastResBytes {
-		total, err = reader.ReadUint64(binary.BigEndian)
+	if code == codes.OK && buf.Len() == def.CodeBytes+def.B64 {
+		total = binary.BigEndian.Uint64(data[def.CodeBytes:])
 	}
 
 	return

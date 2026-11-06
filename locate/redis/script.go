@@ -1,10 +1,10 @@
 package redis
 
-// 解绑网关脚本
+// unbindGateScript is the Lua script that unbinds a gate.
 const unbindGateScript = `
 	local val = redis.call('GET', KEYS[1])
 
-	if val == '' or val ~= ARGV[1] then
+	if val ~= ARGV[1] then
 		return {'NO'}
 	end
 
@@ -13,11 +13,11 @@ const unbindGateScript = `
 	return {'OK'}
 `
 
-// 解绑节点脚本
+// unbindNodeScript is the Lua script that unbinds a node.
 const unbindNodeScript = `
 	local val = redis.call('HGET', KEYS[1], ARGV[1])
 
-	if val == '' or val ~= ARGV[2] then
+	if val ~= ARGV[2] then
 		return {'NO'}
 	end
 

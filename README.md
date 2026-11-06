@@ -1,11 +1,13 @@
-# due 基于Go语言开发的高性能分布式游戏服务器框架
+# due — A High-Performance Distributed Game Server Framework in Go
+
+English | [简体中文](README-ZH.md)
 
 [![Build Status](https://github.com/dobyte/due/workflows/Go/badge.svg)](https://github.com/dobyte/due/actions)
-[![goproxy.cn](https://goproxy.cn/stats/github.com/dobyte/due/badges/download-count.svg)](https://github.com/dobyte/due)
-[![Go Reference](https://pkg.go.dev/badge/github.com/dobyte/due.svg)](https://pkg.go.dev/github.com/dobyte/due)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/dobyte/due)](https://github.com/dobyte/due)
+[![Go Reference](https://pkg.go.dev/badge/github.com/dobyte/due/v2.svg)](https://pkg.go.dev/github.com/dobyte/due/v2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Report Card](https://goreportcard.com/badge/github.com/dobyte/due)](https://goreportcard.com/report/github.com/dobyte/due)
-![Coverage](https://img.shields.io/badge/Coverage-17.4%25-red)
+[![codecov](https://codecov.io/gh/dobyte/due/branch/main/graph/badge.svg)](https://codecov.io/gh/dobyte/due)
 [![Awesome Go](https://awesome.re/mentioned-badge.svg)](https://github.com/avelino/awesome-go)
 
 [![Release](https://img.shields.io/github/v/release/dobyte/due?style=flat)](https://github.com/dobyte/due/releases)
@@ -16,65 +18,222 @@
 [![GitHub issues](https://img.shields.io/github/issues/dobyte/due?style=flat)](https://github.com/dobyte/due/issues)
 [![GitHub closed issues](https://img.shields.io/github/issues-closed/dobyte/due?style=flat)](https://github.com/dobyte/due/issues?q=is%3Aissue+is%3Aclosed)
 
-### 1.介绍
+### 1. Introduction
 
-[due](https://dobyte.github.io/) 是一款基于Go语言开发的轻量级、高性能分布式游戏服务器框架。
-其中，模块设计方面借鉴了[kratos](https://github.com/go-kratos/kratos)的模块设计思路，旨在为游戏服务器开发提供完善、高效、优雅、标准化的解决方案。
-框架自创建至今已在多个企业级游戏项目中上线实践过，稳定性有充分的保障。
+[due](https://dobyte.github.io/) is an out-of-the-box, lightweight and high-performance distributed game server framework developed in Go, built on a complete native cluster solution that easily exceeds 430K+ TPS over the Gate->Node path with 500 concurrent connections on a single thread — battle-proven in multiple enterprise-level game projects, with stability fully guaranteed.
+Its module design draws on the modular design philosophy of [kratos](https://github.com/go-kratos/kratos), aiming to provide a complete, efficient, elegant, and standardized solution for game server development.
 
-![架构图](architecture.jpg)
+![Architecture](assets/architecture.jpg)
 
-### 2.优势
+### 2. Advantages
 
-* 💰 免费性：框架遵循MIT协议，完全开源免费。
-* 💡 简单性：架构简单，源码简洁易理解。
-* 🚠 便捷性：仅暴露必要的调用接口，减轻开发者的心智负担。
-* 🚀 高性能：框架原生实现集群通信方案，普通机器单线程也能轻松实现20W的TPS。
-* 🧊 标准化：框架原生提供标准化的开发规范，无论多么复杂的项目也能轻松应对。
-* ✈️ 高效性：框架原生提供tcp、kcp、ws等服务器，方便开发者快速构建各种类型的网关服务器。
-* ⚖️ 稳定性：所有发布的正式版本均已通过内部真实业务的严格测试，具备较高的稳定性。
-* 🎟️ 扩展性：采用良好的接口设计，方便开发者设计实现自有功能。
-* 🔑 平滑性：引入信号量，通过控制服务注册中心来实现优雅地滚动更新。
-* 🔩 扩容性：通过优雅的路由分发机制，理论上可实现无限扩容。
-* 🔧 易调试：框架原生提供了tcp、kcp、ws等客户端，方便开发者进行独立的调试全流程调试。
-* 🧰 可管理：提供完善的后台管理接口，方便开发者快速实现自定义的后台管理功能。
+* 💰 Free: The framework follows the MIT license and is fully open-source and free.
+* 💡 Simplicity: Simple architecture with concise, easy-to-understand source code.
+* 🚠 Convenience: Only the necessary APIs are exposed, reducing the mental burden on developers.
+* 🚀 High performance: The framework natively implements a cluster communication solution; a single thread on an ordinary machine can easily achieve 430K TPS.
+* 🧊 Standardization: The framework natively provides standardized development conventions, making even the most complex projects easy to handle.
+* ✈️ Efficiency: The framework natively provides tcp, kcp, ws, quic and other servers, making it easy for developers to quickly build various types of gateway servers.
+* ⚖️ Stability: All official releases have passed rigorous testing in real internal business scenarios, offering high stability.
+* 🎟️ Extensibility: Well-designed interfaces make it easy for developers to design and implement their own features.
+* 🔑 Smoothness: Semaphores are introduced to enable graceful rolling updates by controlling the service registry.
+* 🔩 Scalability: A graceful route-dispatch mechanism theoretically enables unlimited horizontal scaling.
+* 🔧 Easy debugging: The framework natively provides tcp, kcp, ws, quic and other clients, making it easy for developers to perform independent end-to-end debugging.
+* 🧰 Manageability: Complete admin APIs make it easy for developers to quickly build custom admin functionality.
 
-### 3.功能
+### 3. Features
 
-* 网关：支持tcp、kcp、ws等协议的网关服务器。
-* 日志：支持console、file、aliyun、tencent等多种日志组件。
-* 注册：支持consul、etcd、nacos等多种服务注册中心。
-* 协议：支持json、protobuf、msgpack等多种通信协议。
-* 配置：支持consul、etcd、nacos等多种配置中心；并支持json、yaml、toml、xml等多种文件格式。
-* 通信：支持grpc、rpcx等多种高性能通信方案。
-* 重启：支持服务器的平滑重启。
-* 事件：支持redis、nats、kafka、rabbitMQ等事件总线实现方案。
-* 加密：支持rsa、ecc等多种加密方案。
-* 服务：支持grpc、rpcx等多种微服务解决方案。
-* 灵活：支持单体、分布式等多种架构方案。
-* Web：提供http协议的fiber服务器及swagger文档解决方案。
-* 工具：提供[due-cli](https://github.com/dobyte/due-cli)脚手架工具箱，可快速构建集群项目。
-* 缓存：支持redis、memcache等多种常用的缓存方案。
-* Actor：提供完善actor模型解决方案。
-* 分布式锁：支持redis、memcache等多种分布式锁解决方案。
+* Gateway: Gateway servers supporting protocols such as tcp, kcp, ws, and quic.
+* Logging: Multiple logging components such as console, file, aliyun, and tencent.
+* Registry: Multiple service registries such as etcd, consul, nacos, and polaris.
+* Protocol: Multiple communication protocols such as json, protobuf, msgpack, xml, yaml, and toml.
+* Configuration: Multiple config centers such as file, etcd, consul, nacos, and polaris; also supports file formats such as json, yaml, toml, and xml.
+* Communication: Multiple high-performance communication solutions such as grpc and rpcx.
+* Restart: Graceful restart of servers.
+* Event: Event bus implementations such as process, redis, nats, and kafka.
+* Encryption: Multiple encryption and signature schemes such as rsa and ecc.
+* Service: Multiple microservice solutions such as grpc and rpcx.
+* Flexible: Multiple architecture options such as monolithic and distributed.
+* Web: Provides a fiber server for the http protocol and a swagger documentation solution.
+* Tooling: Provides the [due-cli](https://github.com/dobyte/due-cli) scaffolding toolbox to quickly build cluster projects.
+* Cache: Multiple commonly used caching solutions such as redis and memcache.
+* Actor: Provides a complete actor model solution.
+* Distributed lock: Multiple distributed lock solutions such as redis and memcache.
+* Network: Servers and clients supporting the four protocols tcp, kcp, ws, and quic, with unified heartbeat, authorization, graceful shutdown, and connection management capabilities.
 
-### 4.下一期新功能规划
+> Next up: a distributed task scheduling system.
 
-* 分布式任务调度系统
+### 4. Architecture and Core Concepts
 
-### 5.特殊说明
+#### 4.1 Components and Container
 
-> 在due交流群中经常有小伙伴提及到Gate、Node、Mesh之间到底是个什么关系，这里就做一个统一的解答
+due adopts a modular "container + component" design. The framework abstracts the gate, node, mesh, cluster client, as well as logging, HTTP, pprof and other capabilities into components (Component), whose lifecycle is orchestrated uniformly by the container (Container):
 
-* Gate：网关服，主要用于管理客户端连接，接收客户端的路由消息，并分发路由消息到不同的的Node节点服。
-* Node: 节点服，作为整个集群系统的核心组件，主要用于核心逻辑业务的编写。Node节点服务可以根据业务需要做成有状态或无状态的节点，当作为无状态的节点时，Node节点与Mesh微服务基本无异；但当Node节点作为有状态节点时，Node节点便不能随意更新进行重启操作。故而Node与Mesh分离的业务场景的价值就体现出来了。
-* Mesh：微服务，主要用于无状态的业务逻辑编写。Mesh能做的功能Node一样可以完成，如何选择完全取决于自身业务场景，开发者可以根据自身业务场景灵活搭配。
+```go
+type Component interface {
+    Name() string // component name
+    Init()        // initialize the component
+    Start()       // start the component
+    Close()       // close the component
+    Destroy()     // destroy the component
+}
 
-### 6.通信协议
+func main() {
+    container := due.NewContainer() // create a container
+    container.Add(component)        // add a component; can be called multiple times
+    container.Serve()               // start the container and wait for system signals
+}
+```
 
-在due框架中，通信协议统一采用size+header+route+seq+message的格式：
+The execution order of `Serve` is: print framework information → `Init` each component in order → `Start` each component in order → write the PID file → wait for system signals → `Close` components concurrently → `Destroy` components concurrently → clean up the PID and global modules.
 
-1.数据包
+* Signal handling: Windows listens for `os.Interrupt`; other systems listen for `SIGINT`, `SIGQUIT`, `SIGABRT`, and `SIGTERM`.
+* Shutdown timeout: the `Close` phase is controlled by `etc.shutdownMaxWaitTime`; the `Destroy` phase has a fixed 5-second timeout.
+* Graceful restart: during the `Close` phase, Gate/Node/Mesh set their own state to `hang` and refresh the instance state in the registry, so that new traffic no longer enters the instance, while waiting for existing sessions and messages to be fully processed. The actual deregistration happens in the `Destroy` phase. Combined with semaphores, this enables rolling updates.
+
+#### 4.2 Instance Kind
+
+| Constant | Value | String | Description |
+| --- | --- | --- | --- |
+| `cluster.Gate` | 1 | gate | Gateway server |
+| `cluster.Node` | 2 | node | Node server |
+| `cluster.Mesh` | 3 | mesh | Microservice |
+| `cluster.Master` | 4 | master | Admin server |
+
+#### 4.3 Instance State
+
+| Constant | Value | String | Description |
+| --- | --- | --- | --- |
+| `cluster.Shut` | 0 | shut | Shut down |
+| `cluster.Work` | 1 | work | Working |
+| `cluster.Busy` | 2 | busy | Busy |
+| `cluster.Hang` | 3 | hang | Hanging |
+
+> The gateway accepts new client connections only in the `work` and `busy` states; in all other states it closes the connection immediately.
+
+#### 4.4 Lifecycle Hook
+
+| Constant | Value | Description |
+| --- | --- | --- |
+| `cluster.Init` | 0 | Initialize the component |
+| `cluster.Start` | 1 | Start the component |
+| `cluster.Close` | 2 | Close the component |
+| `cluster.Destroy` | 3 | Destroy the component |
+
+The node, mesh, and cluster client components can listen to their own lifecycle via `Proxy.AddHookListener(hook, handler)`, which is commonly used for initialization work such as establishing connections after the component starts.
+
+#### 4.5 Event Type
+
+| Constant | Value | Description |
+| --- | --- | --- |
+| `cluster.Connect` | 1 | Connection opened |
+| `cluster.Reconnect` | 2 | Reconnected after disconnection |
+| `cluster.Disconnect` | 3 | Connection closed |
+
+#### 4.6 Dispatch Strategy
+
+Load dispatch strategies between cluster instances:
+
+| Constant | Value | Description |
+| --- | --- | --- |
+| `cluster.Random` | random | Random |
+| `cluster.RoundRobin` | rr | Round robin |
+| `cluster.WeightedRoundRobin` | wrr | Weighted round robin |
+
+The cluster's internal transport layer (grpc/rpcx) additionally supports a consistent-hash strategy (`ch`), which pins calls with the same request characteristics to the same instance.
+
+#### 4.7 Gate, Node, Mesh, and Client
+
+> Members of the due community frequently ask about the relationship among Gate, Node, and Mesh, so here is a unified explanation.
+
+* Gate: The gateway server, mainly used to manage client connections, receive routed messages from clients, and dispatch routed messages to different Node servers.
+* Node: The node server, the core component of the entire cluster system, mainly used to write core business logic. Node services can be stateful or stateless as needed. As a stateless node, a Node is essentially no different from a Mesh microservice; but as a stateful node, a Node cannot be updated and restarted freely. This is where the value of separating Node from Mesh comes in.
+* Mesh: The microservice, mainly used to write stateless business logic. Anything Mesh can do, Node can do as well; the choice depends entirely on your own business scenario, and developers can combine them flexibly.
+* Client: The cluster client component, which can dial the gateway directly. It is convenient for writing automated tests, stress-test programs, or bot logic within a server project, enabling independent end-to-end debugging.
+
+### 5. Project Structure
+
+```text
+due/
+├── container.go            Container entry (the only source file in the root package)
+├── cluster/                Cluster components
+│   ├── cluster.go          Cluster model: Kind/State/Event/Hook/Dispatch and cluster message structures
+│   ├── gate/               Gateway component
+│   ├── node/               Node component (routing, events, actor model)
+│   ├── mesh/               Microservice component
+│   └── client/             Cluster client component
+├── network/                Network module: tcp, kcp, ws, quic
+├── session/                Gateway session management: connection sessions, user sessions, and channel subscriptions
+├── packet/                 Communication protocol packing: Packer and Message
+├── internal/               Internal implementation: cluster linker, instance dispatcher, intranet RPC protocol
+├── registry/               Registries: etcd, consul, nacos, polaris
+├── config/                 Config centers: file, etcd, consul, nacos, polaris
+├── locate/                 User location: redis
+├── transport/              Internal cluster transport: grpc, rpcx
+├── eventbus/               Event buses: process, redis, nats, kafka
+├── cache/                  Caches: redis, memcache
+├── lock/                   Distributed locks: redis, memcache
+├── crypto/                 Encryption/decryption and signatures: rsa, ecc
+├── encoding/               Codecs: json, proto, msgpack, xml, yaml, toml
+├── log/                    Logging: console, file, aliyun, tencent
+├── component/              Built-in components: http, mqtt, pprof
+├── core/                   Core foundation library: buffer, queue, value, stack, limiter, etc.
+├── utils/                  Utility library: xcall, xconv, xnet, xtime, xhash, etc.
+├── codes/, errors/         Error codes and error definitions
+├── mode/, flag/, env/, etc/  Run mode, command-line flags, environment variables, and startup configuration
+├── task/                   Global task pool and task groups
+├── docker/                 Middleware orchestration (docker-compose.yaml)
+├── benchmark/              Stress-test project (a separate Go module)
+└── testdata/               Example configuration and test data
+```
+
+### 6. Module List
+
+The framework is published as multiple modules: the core capabilities live in the main module `github.com/dobyte/due/v2`, while pluggable components are each an independent module, making it easy to import them on demand.
+
+| Category | Component | Import Path |
+| --- | --- | --- |
+| Core | Framework main module | `github.com/dobyte/due/v2` |
+| Network | tcp | `github.com/dobyte/due/network/tcp/v2` |
+| Network | kcp | `github.com/dobyte/due/network/kcp/v2` |
+| Network | ws | `github.com/dobyte/due/network/ws/v2` |
+| Network | quic | `github.com/dobyte/due/network/quic/v2` |
+| Registry | etcd | `github.com/dobyte/due/registry/etcd/v2` |
+| Registry | consul | `github.com/dobyte/due/registry/consul/v2` |
+| Registry | nacos | `github.com/dobyte/due/registry/nacos/v2` |
+| Registry | polaris | `github.com/dobyte/due/registry/polaris/v2` |
+| Config Center | file (built-in) | `github.com/dobyte/due/v2/config/file` |
+| Config Center | etcd | `github.com/dobyte/due/config/etcd/v2` |
+| Config Center | consul | `github.com/dobyte/due/config/consul/v2` |
+| Config Center | nacos | `github.com/dobyte/due/config/nacos/v2` |
+| Config Center | polaris | `github.com/dobyte/due/config/polaris/v2` |
+| Location | redis | `github.com/dobyte/due/locate/redis/v2` |
+| Transport | grpc | `github.com/dobyte/due/transport/grpc/v2` |
+| Transport | rpcx | `github.com/dobyte/due/transport/rpcx/v2` |
+| Event Bus | process (built-in) | `github.com/dobyte/due/v2/eventbus/process` |
+| Event Bus | redis | `github.com/dobyte/due/eventbus/redis/v2` |
+| Event Bus | nats | `github.com/dobyte/due/eventbus/nats/v2` |
+| Event Bus | kafka | `github.com/dobyte/due/eventbus/kafka/v2` |
+| Cache | redis | `github.com/dobyte/due/cache/redis/v2` |
+| Cache | memcache | `github.com/dobyte/due/cache/memcache/v2` |
+| Distributed Lock | redis | `github.com/dobyte/due/lock/redis/v2` |
+| Distributed Lock | memcache | `github.com/dobyte/due/lock/memcache/v2` |
+| Crypto | rsa | `github.com/dobyte/due/crypto/rsa/v2` |
+| Crypto | ecc | `github.com/dobyte/due/crypto/ecc/v2` |
+| Logging | console (built-in) | `github.com/dobyte/due/v2/log/console` |
+| Logging | file (built-in) | `github.com/dobyte/due/v2/log/file` |
+| Logging | aliyun | `github.com/dobyte/due/log/aliyun/v2` |
+| Logging | tencent | `github.com/dobyte/due/log/tencent/v2` |
+| Component | http | `github.com/dobyte/due/component/http/v2` |
+| Component | mqtt | `github.com/dobyte/due/component/mqtt/v2` |
+| Component | pprof (built-in) | `github.com/dobyte/due/v2/component/pprof` |
+
+> Codecs (`encoding/*`), protocol packing (`packet`), the core foundation library (`core/*`), and the utility library (`utils/*`) are all built into the main module and do not need to be imported separately.
+
+### 7. Communication Protocol
+
+In the due framework, the communication protocol uniformly uses the format size+header+route+seq+message:
+
+1. Data packet
 
 ```
  0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7
@@ -85,7 +244,7 @@
 +-----------------------------------------------------------------------------------------------------------------------------------------------+
 ```
 
-2.心跳包
+2. Heartbeat packet
 
 ```
  0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7
@@ -96,55 +255,55 @@
 
 size: 4 bytes
 
-- 包长度位
-- 固定长度为4字节，且不可修改
+- Packet length field
+- Fixed at 4 bytes and cannot be modified
 
 header: 1 bytes
 
 h: 1 bit
 
-- 心跳标识位
-- %x0 表示数据包
-- %x1 表示心跳包
+- Heartbeat flag
+- %x0 indicates a data packet
+- %x1 indicates a heartbeat packet
 
 extcode: 7 bit
 
-- 扩展操作码
-- 暂未明确定义具体操作码
+- Extended opcode
+- The specific opcodes are not yet clearly defined
 
 route: 1 bytes | 2 bytes | 4 bytes
 
-- 消息路由
-- 默认采用2字节，可通过打包器配置packet.routeBytes进行修改
-- 不同的路由对应不同的业务处理流程
-- 心跳包无消息路由位
-- 此参数由业务打包器打包，服务器开发者和客户端开发者均要关心此参数
+- Message route
+- Defaults to 2 bytes; can be changed via the packer's packet.routeBytes setting
+- Different routes correspond to different business handling flows
+- Heartbeat packets have no message route field
+- This parameter is packed by the business packer; both server and client developers need to care about it
 
 seq: 0 bytes | 1 bytes | 2 bytes | 4 bytes
 
-- 消息序列号
-- 默认采用2字节，可通过打包器配置packet.seqBytes进行修改
-- 可通过将打包器配置packet.seqBytes设置为0来屏蔽使用序列号
-- 消息序列号常用于请求/响应模型的消息对儿的确认
-- 心跳包无消息序列号位
-- 此参数由业务打包器packet.Packer打包，服务器开发者和客户端开发者均要关心此参数
+- Message sequence number
+- Defaults to 2 bytes; can be changed via the packer's packet.seqBytes setting
+- Set packet.seqBytes to 0 to disable the sequence number
+- The message sequence number is commonly used to acknowledge request/response message pairs
+- Heartbeat packets have no message sequence number field
+- This parameter is packed by the business packer packet.Packer; both server and client developers need to care about it
 
 message data: n bytes
 
-- 消息数据
-- 心跳包无消息数据
-- 此参数由业务打包器packet.Packer打包，服务器开发者和客户端开发者均要关心此参数
+- Message data
+- Heartbeat packets have no message data
+- This parameter is packed by the business packer packet.Packer; both server and client developers need to care about it
 
 heartbeat time: 8 bytes
 
-- 心跳数据
-- 数据包无心跳数据
-- 上行心跳包无需携带心跳数据，下行心跳包默认携带8 bytes的服务器时间（ns），可通过网络库配置进行设置是否携带下行包时间信息
-- 此参数由网络框架层自动打包，服务端开发者不关注此参数，客户端开发者需关注此参数
+- Heartbeat data
+- Data packets have no heartbeat data
+- Uplink heartbeat packets need not carry heartbeat data; downlink heartbeat packets carry 8 bytes of server time (ns) by default, and whether to include the downlink packet time information can be configured in the network library
+- This parameter is packed automatically by the network framework layer; server developers do not need to care about it, but client developers do
 
-### 7.相关工具链
+### 8. Related Toolchain
 
-1.安装protobuf编译器（使用场景：开发mesh微服务）
+1. Install the protobuf compiler (use case: developing mesh microservices)
 
 - Linux, using apt or apt-get, for example:
 
@@ -162,87 +321,167 @@ $ protoc --version  # Ensure compiler version is 3+
 
 - Windows, download from [Github](https://github.com/protocolbuffers/protobuf/releases):
 
-2.安装protobuf go代码生成工具（使用场景：开发mesh微服务）
+2. Install the protobuf Go code generator (use case: developing mesh microservices)
 
 ```shell
 go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 ```
 
-3.安装grpc代码生成工具（使用场景：使用[GRPC](https://grpc.io/)组件开发mesh微服务）
+3. Install the grpc code generator (use case: developing mesh microservices with the [GRPC](https://grpc.io/) component)
 
 ```shell
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 ```
 
-4.安装rpcx代码生成工具（使用场景：使用[RPCX](https://rpcx.io/)组件开发mesh微服务）
+4. Install the rpcx code generator (use case: developing mesh microservices with the [RPCX](https://rpcx.io/) component)
 
 ```shell
 go install github.com/rpcxio/protoc-gen-rpcx@latest
 ```
 
-5.安装gorm dao代码生成工具（使用场景：使用[GORM](https://gorm.io/)作为数据库orm）
+5. Install the gorm dao code generator (use case: using [GORM](https://gorm.io/) as the database ORM)
 
 ```shell
 go install github.com/dobyte/gorm-dao-generator@latest
 ```
 
-6.安装mongo dao代码生成工具（使用场景：使用[MongoDB](https://github.com/mongodb/mongo-go-driver)作为数据库orm）
+6. Install the mongo dao code generator (use case: using [MongoDB](https://github.com/mongodb/mongo-go-driver) as the database ORM)
 
 ```shell
 go install github.com/dobyte/mongo-dao-generator@latest
 ```
 
-### 8.配置中心
+### 9. Config Center
 
-1.功能介绍
+1. Feature overview
 
-配置中心主要定位于业务的配置管理，提供快捷灵活的配置方案。支持完善的读取、修改、删除、热更新等功能。
+The config center focuses on business configuration management, providing a fast and flexible configuration solution. It supports complete reading, modification, deletion, and hot-reload capabilities.
 
-2.支持组件
+The core interface is `config.Configurator`, whose main methods are: `Has`, `Get`, `Set`, `Match`, `Watch` (listen for config changes), `Load`, `Store`, and `Close`. Its implementation is decoupled into "config source (Source) + codec (Codec)", so the config file format and the config source are independent of each other.
+
+2. Supported components
 
 * [file](config/file/README-ZH.md)
 * [etcd](config/etcd/README-ZH.md)
 * [consul](config/consul/README-ZH.md)
-* [nacos](config/nacos/README-ZH.md)
+* [nacos](config/nacos)
+* [polaris](config/polaris/README-ZH.md)
 
-### 9.注册中心
+3. Supported config formats
 
-1.功能介绍
+json, yaml (yml), toml, xml.
 
-注册中心用于集群实例的服务注册和发现。支撑整个集群的无感知停服、重启、动态扩容等功能。
+### 10. Registry
 
-2.支持组件
+1. Feature overview
+
+The registry is used for service registration and discovery of cluster instances. It underpins capabilities such as imperceptible downtime, restarts, and dynamic scaling of the entire cluster.
+
+The core interface is `registry.Registry`, whose main methods are: `Register`, `Deregister`, `Watch` (listen for instance changes), `Services`, and `Close`; it is accompanied by `registry.Watcher` for consuming instance change events. Instance information is described by `registry.ServiceInstance`, including instance ID, name, kind, state, routes, events, services, endpoint, weight, and metadata.
+
+2. Supported components
 
 * [etcd](registry/etcd/README-ZH.md)
 * [consul](registry/consul/README-ZH.md)
-* [nacos](registry/nacos/README-ZH.md)
+* [nacos](registry/nacos)
+* [polaris](registry/polaris)
 
-### 10.网络模块
+### 11. Network Module
 
-1.功能介绍
+1. Feature overview
 
-网络模块主要以组件的形式集成于网关模块，为网关提供灵活的网络通信支持。
+The network module is mainly integrated into the gateway module as components, providing the gateway with flexible network communication support. The four protocol implementations share exactly the same interfaces (`network.Server`, `network.Client`, `network.Conn`), so the gateway component can switch freely without modifying business code.
 
-2.支持组件
+2. Supported protocols
 
-* [tcp](network/tcp/README-ZH.md)
-* [kcp](network/kcp/README-ZH.md)
-* [ws](network/ws/README-ZH.md)
+| Protocol | Transport | Underlying dependency | Typical scenario |
+| --- | --- | --- | --- |
+| [tcp](network/tcp) | TCP | standard net library | Intranet long connections, scenarios with the highest performance requirements |
+| [ws](network/ws) | TCP (WebSocket) | gorilla/websocket | Web access from browsers, H5, mini programs, etc. |
+| [kcp](network/kcp) | UDP (reliable transport) | xtaci/kcp-go/v5 | Mobile networks, weak-network environments |
+| [quic](network/quic/README.md) | UDP (TLS 1.3 multiplexing) | quic-go | Weak networks that require strong security and connection migration |
+
+3. Common capabilities
+
+* Heartbeat detection: supports both `resp` (responsive, driven by client heartbeats) and `tick` (proactively sent by the server on a timer) mechanisms; an interval of 0 disables timed heartbeats.
+* Authorization timeout: if the user ID is not bound within the specified time after the connection is established, the connection is closed automatically.
+* Graceful shutdown: drains the write queue before closing the connection, with `closeTimeout` limiting the upper bound of the drain wait; forced close interrupts immediately.
+* Bounded write queue and write timeout (`writeQueueSize`, `writeTimeout`); when the queue is full, an error is returned according to the write timeout.
+* Maximum connection limit (`maxConnNum`), connection ID, user ID binding (`Bind`/`Unbind`), and custom attributes (`Attr`).
+* Unified object-pool reuse and sharded connection management, supporting restart after the server stops.
+* tcp/ws/kcp support ProxyProtocol; tcp/ws support TLS/HTTPS.
+
+4. Configuration items
+
+The configuration items for each protocol live under `etc.network.<protocol>.server.*` and `etc.network.<protocol>.client.*`, and can also be set via the corresponding `WithServer*`/`WithClient*` functions:
+
+| Configuration Item | tcp | ws | kcp | quic | Description |
+| --- | --- | --- | --- | --- | --- |
+| addr | :3553 | :3553 | :3553 | :3553 | Listen address |
+| maxConnNum | 5000 | 5000 | 5000 | 5000 | Maximum number of connections |
+| writeQueueSize | 1024 | 1024 | 1024 | 1024 | Write queue size |
+| writeTimeout | 0s | 0s | 0s | 0s | Write timeout; 0 means unlimited |
+| heartbeatInterval | 10s | 10s | 10s | 10s | Heartbeat interval |
+| heartbeatMechanism | resp | resp | resp | resp | Heartbeat mechanism |
+| authorizeTimeout | 0s | 0s | 0s | 0s | Authorization timeout; 0 means no check |
+| closeTimeout | 0s | 0s | 0s | 5s | Graceful shutdown drain limit; 0 means unlimited |
+| readBufferSize | 4096 | 4096 | - | - | Read buffer size |
+| certFile / keyFile | Optional | Optional | - | Required | Certificate and private key |
+| enableProxyProtocol | false | - | false | - | Whether to enable ProxyProtocol |
+| handshakeTimeout | - | - | - | 5s | QUIC handshake and first-stream wait timeout |
+| path | - | / | - | - | WebSocket connection path |
+| origins | - | * | - | - | WebSocket cross-origin allowlist |
+| writeBufferSize | - | 4096 | - | - | WebSocket write buffer |
+| enableCompression | - | false | - | - | Whether to enable compression |
+| compressionLevel | - | 1 | - | - | Compression level (1-9) |
+| proxyMode | - | none | - | - | Proxy mode: none/transport/application |
+| mtu | - | - | 1400 | - | KCP maximum transmission unit |
+| noDelay | - | - | [1,10,2,1] | - | KCP no-delay mode parameters |
+| windowSize | - | - | [32,32] | - | KCP send/receive window |
+| ackNoDelay / writeDelay | - | - | Optional / true | - | KCP ACK and write delay parameters |
+| readBuffer / writeBuffer | - | - | Optional | - | KCP socket read/write buffers |
+
+> For protocol-specific parameters not listed in the table, refer to `server_options.go` and `client_options.go` in the corresponding directory.
+
+5. Usage example
+
+```go
+// server
+server := ws.NewServer(ws.WithServerAddr("0.0.0.0:3553"))
+server.OnReceive(func(conn network.Conn, buf buffer.Buffer) {
+    defer buf.Release()
+    // handle business messages
+})
+if err := server.Start(); err != nil {
+    log.Fatalf("start server failed: %v", err)
+}
+
+// client (can be used for independent debugging)
+client := ws.NewClient(ws.WithClientUrl("ws://127.0.0.1:3553"))
+conn, err := client.Dial()
+```
+
+6. Notes
+
+* Buffer ownership: `Push` returning nil means the buffer ownership has been transferred to the network layer, which is responsible for releasing it; when an error is returned, the caller must release it itself. The buffer received by the `OnReceive` callback is the responsibility of the business layer to release.
+* When no `OnReceive` callback is registered, received message buffers are released automatically.
+* The `Close` semantics of a server connection are "wait for the write queue to drain", and it can be called inside callbacks; however, do not synchronously call the server's `Stop` inside callbacks such as `OnClose`/`OnDisconnect`, to avoid blocking.
+* Gateway messages are packed by the `packet` module, and the message body has the structure `route`+`seq`+`message`; see the "Communication Protocol" section for details.
 
 
-### 11.快速开始
+### 12. Quick Start
 
-下面我们就通过两段简单的代码来体验一下due的魅力，Let's go~~
+Below, let's experience the charm of due through two simple code snippets. Let's go~~
 
-1.启动组件
+1. Start the components
 
 ```shell
 docker-compose up
 ```
 
-> docker-compose.yaml文件已在docker目录中备好，可以直接取用
+> The docker-compose.yaml file is already prepared in the docker directory and can be used directly.
 
-2.获取框架
+2. Get the framework
 
 ```shell
 go get -u github.com/dobyte/due/v2@latest
@@ -252,7 +491,7 @@ go get -u github.com/dobyte/due/registry/consul/v2@latest
 go get -u github.com/dobyte/due/transport/rpcx/v2@latest
 ```
 
-3.构建Gate服务器
+3. Build the Gate server
 
 ```go
 package main
@@ -266,28 +505,28 @@ import (
 )
 
 func main() {
-   // 创建容器
+   // create a container
    container := due.NewContainer()
-   // 创建服务器
+   // create a server
    server := ws.NewServer()
-   // 创建用户定位器
+   // create a user locator
    locator := redis.NewLocator()
-   // 创建服务发现
+   // create a service discovery
    registry := consul.NewRegistry()
-   // 创建网关组件
+   // create the gate component
    component := gate.NewGate(
       gate.WithServer(server),
       gate.WithLocator(locator),
       gate.WithRegistry(registry),
    )
-   // 添加网关组件
+   // add the gate component
    container.Add(component)
-   // 启动容器
+   // start the container
    container.Serve()
 }
 ```
 
-4.启动Gate服务器
+4. Start the Gate server
 
 ```shell
 $ go run main.go
@@ -298,7 +537,7 @@ $ go run main.go
                 /_____/\____/_____/
 ┌──────────────────────────────────────────────────────┐
 | [Website] https://github.com/dobyte/due              |
-| [Version] v2.1.0                                     |
+| [Version] v2.6.2                                     |
 └──────────────────────────────────────────────────────┘
 ┌────────────────────────Global────────────────────────┐
 | PID: 27159                                           |
@@ -313,7 +552,7 @@ $ go run main.go
 └──────────────────────────────────────────────────────┘
 ```
 
-5.构建Node服务器
+5. Build the Node server
 
 ```go
 package main
@@ -332,26 +571,26 @@ import (
 const greet = 1
 
 func main() {
-   // 创建容器
+   // create a container
    container := due.NewContainer()
-   // 创建用户定位器
+   // create a user locator
    locator := redis.NewLocator()
-   // 创建服务发现
+   // create a service discovery
    registry := consul.NewRegistry()
-   // 创建节点组件
+   // create the node component
    component := node.NewNode(
       node.WithLocator(locator),
       node.WithRegistry(registry),
    )
-   // 初始化监听
+   // initialize listeners
    initListen(component.Proxy())
-   // 添加节点组件
+   // add the node component
    container.Add(component)
-   // 启动容器
+   // start the container
    container.Serve()
 }
 
-// 初始化监听
+// initialize listeners
 func initListen(proxy *node.Proxy) {
    proxy.Router().AddRouteHandler(greet, false, greetHandler)
 }
@@ -387,7 +626,7 @@ func greetHandler(ctx node.Context) {
 }
 ```
 
-6.启动Node服务器
+6. Start the Node server
 ```shell
 $ go run main.go
                     ____  __  ________
@@ -397,7 +636,7 @@ $ go run main.go
                 /_____/\____/_____/
 ┌──────────────────────────────────────────────────────┐
 | [Website] https://github.com/dobyte/due              |
-| [Version] v2.1.0                                     |
+| [Version] v2.6.2                                     |
 └──────────────────────────────────────────────────────┘
 ┌────────────────────────Global────────────────────────┐
 | PID: 27390                                           |
@@ -414,7 +653,7 @@ $ go run main.go
 └──────────────────────────────────────────────────────┘
 ```
 
-7.构建测试客户端
+7. Build the test client
 
 ```go
 package main
@@ -435,33 +674,33 @@ import (
 const greet = 1
 
 func main() {
-   // 初始化事件总线
+   // initialize the event bus
    eventbus.SetEventbus(nats.NewEventbus())
-   // 创建容器
+   // create a container
    container := due.NewContainer()
-   // 创建客户端组件
+   // create the client component
    component := client.NewClient(
       client.WithClient(ws.NewClient()),
    )
-   // 初始化监听
+   // initialize listeners
    initListen(component.Proxy())
-   // 添加客户端组件
+   // add the client component
    container.Add(component)
-   // 启动容器
+   // start the container
    container.Serve()
 }
 
-// 初始化监听
+// initialize listeners
 func initListen(proxy *client.Proxy) {
-   // 监听组件启动
+   // listen for component start
    proxy.AddHookListener(cluster.Start, startHandler)
-   // 监听连接建立
+   // listen for connection establishment
    proxy.AddEventListener(cluster.Connect, connectHandler)
-   // 监听消息回复
+   // listen for message replies
    proxy.AddRouteHandler(greet, greetHandler)
 }
 
-// 组件启动处理器
+// component start handler
 func startHandler(proxy *client.Proxy) {
    if _, err := proxy.Dial(); err != nil {
       log.Errorf("gate connect failed: %v", err)
@@ -469,12 +708,12 @@ func startHandler(proxy *client.Proxy) {
    }
 }
 
-// 连接建立处理器
+// connection establishment handler
 func connectHandler(conn *client.Conn) {
    doPushMessage(conn)
 }
 
-// 消息回复处理器
+// message reply handler
 func greetHandler(ctx *client.Context) {
    res := &greetRes{}
 
@@ -495,7 +734,7 @@ func greetHandler(ctx *client.Context) {
    })
 }
 
-// 推送消息
+// push a message
 func doPushMessage(conn *client.Conn) {
    err := conn.Push(&cluster.Message{
       Route: 1,
@@ -518,7 +757,7 @@ type greetRes struct {
 }
 ```
 
-8.启动客户端
+8. Start the client
 ```shell
 $ go run main.go
                     ____  __  ________
@@ -528,7 +767,7 @@ $ go run main.go
                 /_____/\____/_____/
 ┌──────────────────────────────────────────────────────┐
 | [Website] https://github.com/dobyte/due              |
-| [Version] v2.1.0                                     |
+| [Version] v2.6.2                                     |
 └──────────────────────────────────────────────────────┘
 ┌────────────────────────Global────────────────────────┐
 | PID: 27801                                           |
@@ -548,153 +787,180 @@ INFO[2024/07/03 14:53:12.991217] main.go:72 [I'm server, and the current time is
 INFO[2024/07/03 14:53:13.995049] main.go:72 [I'm server, and the current time is: 2024-07-03 14:53:13]
 ```
 
-### 12.压力测试
-1.压测机器
+### 13. Stress Test
 
-```text
-Ubuntu 20.04.6 LTS 13th Gen Intel(R) Core(TM) i5-13400F 16GB
-```
+This section contains two different kinds of tests: subsections 1-5 are the four-framework comparison, and subsection 6 is a supplementary benchmark of Due's own TCP cluster path. They use different machines, parameters and purposes, so the results are not comparable.
 
-2.压测结果
+The four-framework data in subsections 1-5 was updated on **2026-10-26** using the [four-framework TCP retest report](https://github.com/dobyte/due-benchmark/blob/master/comparison/reports/2026-10-26/REPORT.md). All 108 cases and 10,800,000 measured requests completed with zero failures. Before testing, both the local `due.Version` constant and the deployed binary were verified as **v2.6.5**. The source worktree was clean at `d56a53eb788837b33d0d0a205b1c9f58fb0103ed`; HEAD had no release tag, so this is a frozen local source snapshot.
 
-```shell
-                    ____  __  ________
-                   / __ \/ / / / ____/
-                  / / / / / / / __/
-                 / /_/ / /_/ / /___
-                /_____/\____/_____/
-┌──────────────────────────────────────────────────────┐
-| [Website] https://github.com/dobyte/due              |
-| [Version] v2.3.2                                     |
-└──────────────────────────────────────────────────────┘
-┌────────────────────────Global────────────────────────┐
-| PID: 14885                                           |
-| Mode: debug                                          |
-| Time: 2025-09-09 19:45:41.534775032 +0800 CST        |
-└──────────────────────────────────────────────────────┘
-┌────────────────────────Client────────────────────────┐
-| Name: client                                         |
-| Codec: json                                          |
-| Protocol: tcp                                        |
-| Encryptor: -                                         |
-└──────────────────────────────────────────────────────┘
-server               : tcp
-concurrency          : 50
-latency              : 4.073481s
-data size            : 1.00KB
-sent requests        : 1000000
-received requests    : 1000000
-throughput (TPS)     : 245490
---------------------------------
-server               : tcp
-concurrency          : 100
-latency              : 4.356167s
-data size            : 1.00KB
-sent requests        : 1000000
-received requests    : 1000000
-throughput (TPS)     : 229559
---------------------------------
-server               : tcp
-concurrency          : 200
-latency              : 4.673732s
-data size            : 1.00KB
-sent requests        : 1000000
-received requests    : 1000000
-throughput (TPS)     : 213961
---------------------------------
-server               : tcp
-concurrency          : 300
-latency              : 4.424671s
-data size            : 1.00KB
-sent requests        : 1000000
-received requests    : 1000000
-throughput (TPS)     : 226005
---------------------------------
-server               : tcp
-concurrency          : 400
-latency              : 4.343600s
-data size            : 1.00KB
-sent requests        : 1000000
-received requests    : 1000000
-throughput (TPS)     : 230223
---------------------------------
-server               : tcp
-concurrency          : 500
-latency              : 4.441719s
-data size            : 1.00KB
-sent requests        : 1000000
-received requests    : 1000000
-throughput (TPS)     : 225138
---------------------------------
-server               : tcp
-concurrency          : 1000
-latency              : 4.882094s
-data size            : 1.00KB
-sent requests        : 1000000
-received requests    : 1000000
-throughput (TPS)     : 204830
---------------------------------
-server               : tcp
-concurrency          : 1000
-latency              : 6.283487s
-data size            : 2.00KB
-sent requests        : 1000000
-received requests    : 1000000
-throughput (TPS)     : 159147
---------------------------------
-```
+1. Test scenario
 
-本测试结果仅供参考，详细测试用例代码请查看[due-benchmark](https://github.com/dobyte/due-benchmark)
+The load generator calls the TCP entry of Skynet, Pitaya, KBEngine and Due. Each framework serves the request through a gateway process and a business process, and the business operation echoes the payload unchanged. The measurement covers network I/O, protocol handling, routing and inter-process dispatch, without database work or artificial delays.
 
-### 13.其他组件
+2. Test setup
 
-1. 日志组件
-    * zap: github.com/dobyte/due/log/zap/v2
-    * logrus: github.com/dobyte/due/log/logrus/v2
+| Item | Configuration |
+|---|---|
+| Payload | 64 B, 1 KB and 4 KB |
+| Connections | 32, 128 and 512 persistent TCP connections |
+| Request model | Closed loop, at most one outstanding request per connection |
+| Warm-up | 10,000 requests per case, excluded from the measurement |
+| Measured requests | 100,000 per case |
+| Rounds | 3 per combination |
+| Matrix | 4 frameworks × 3 payloads × 3 connection counts × 3 rounds = 108 cases |
+
+3. Test environment
+
+| Item | Configuration |
+|---|---|
+| CPU | Intel Core i5-10400F @ 2.90GHz, 6 physical cores / 12 logical threads |
+| Memory | 32 GB |
+| OS | CentOS 7, Linux 3.10, x86_64 |
+| Go | 1.27.1 |
+| Deployment | Single machine loopback, frameworks run one after another |
+| Frameworks | Skynet `64391f732e76`, Pitaya `f3d0af570f76`, KBEngine `7d379b9f943d`, Due v2.6.5 local snapshot `d56a53eb7888` |
+
+Go processes run with `GOMAXPROCS=2` and the two Skynet processes with `thread=2`. CPU affinity is bound per role: gateway on logical CPUs `0,6`, business on `1,7`, load generator on `2,3,8,9`, infrastructure on `4,10`. Affinity limits the range of the test processes, it does not reserve the whole machine.
+
+4. Test results (1 KB payload, 128 connections)
+
+All values are medians of three rounds; the range in parentheses is the minimum and maximum QPS.
+
+| Framework | QPS (min-max) | P99 (ms) | P99.9 (ms) | Server CPU (%) | Server RSS (MiB) |
+|---|---:|---:|---:|---:|---:|
+| Skynet | 21,390 (21,230-21,572) | 7.873 | 19.681 | 188.5 | 149.7 |
+| Pitaya | 16,661 (16,584-16,685) | 11.111 | 12.052 | 350.4 | 53.5 |
+| KBEngine | 46,827 (46,058-47,892) | 2.936 | 3.015 | 152.8 | 33.6 |
+| Due v2.6.5 | 102,752 (102,423-103,330) | 2.963 | 4.739 | 322.6 | 58.0 |
+
+Due reaches the highest throughput under this load. KBEngine keeps lower P99 and P99.9 latency with this adapter, and Due consumes more CPU, so the throughput gap cannot be read as a per-CPU efficiency comparison.
+
+KBEngine uses the official poller TCP extension and native BaseApp/CellApp EntityCall; native player login and the Proxy client protocol are excluded. Server CPU/RSS covers only gateway and business processes, excluding infrastructure and management services; 100% CPU means one logical CPU. Due retains its default debug mode. The other three frameworks and load generator reuse the first run's fixed binaries, with all four frameworks measured again.
+
+These results describe the cross-process echo path of the listed versions and CPU allocation only. They are not a general ranking of the frameworks, do not include coordinated-omission correction, and do not cover idle connections, connection multiplexing, login storms or multi-machine deployments. See [due-benchmark](https://github.com/dobyte/due-benchmark) for the remaining payload and connection combinations, the full report and the raw data.
+
+5. Charts
+
+The charts cover all payload and connection combinations. Each point is the median of three rounds and the error bars span the minimum to the maximum of the three rounds.
+
+![Four-framework throughput](assets/benchmark/qps.png)
+
+![Four-framework P99 latency](assets/benchmark/p99_us.png)
+
+![Four-framework P99.9 latency](assets/benchmark/p999_us.png)
+
+![Gateway and business process CPU usage](assets/benchmark/server_cpu_pct.png)
+
+![Gateway and business process RSS](assets/benchmark/server_peak_rss_mib.png)
+
+![Load generator CPU usage](assets/benchmark/loadgen_cpu_pct.png)
+
+6. Single-framework cluster path benchmark (supplementary)
+
+This benchmark uses a different machine, connection model and concurrency settings from the four-framework comparison above. It is intended only to observe Due's own cluster path, and must not be compared with the four-framework results.
+
+Test scenario: the load generator connects through Gate, the request is routed to Node and the 1 KB payload is echoed back unchanged. The protocol is TCP + JSON, covering gateway I/O, cross-process routing and node dispatch.
+
+Test setup
+
+| Item | Configuration |
+|---|---|
+| Payload | 1 KB |
+| Throughput mode | 50/100/200/500/1000 persistent connections, 32 outstanding requests per connection, 30 s per case, 3 s warm-up |
+| Latency mode | Same connection counts, closed loop with 1 outstanding request per connection, 100,000 requests per case |
+| Rounds | 3 per case |
+| Runtime mode | release |
+
+Test environment
+
+| Item | Configuration |
+|---|---|
+| CPU | WSL2 Ubuntu, 16 logical CPUs |
+| OS | Ubuntu (WSL2), x86_64 |
+| Go | 1.27.3 |
+| Deployment | Single machine loopback; Gate, Node and load generator share the host, no CPU pinning and no `GOMAXPROCS` limit |
+| Version | Due v2.6.5, commit `06836bde` |
+
+Results (1 KB payload, medians of three rounds; the QPS range in parentheses is the minimum and maximum)
+
+| Connections | Throughput QPS (min-max) | Latency P50 (ms) | Latency P99 (ms) |
+|---:|---:|---:|---:|
+| 50 | 474,594 (455,152-493,738) | 0.574 | 1.517 |
+| 100 | 464,367 (459,968-466,201) | 0.716 | 2.081 |
+| 200 | 467,448 (467,150-467,960) | 0.982 | 3.377 |
+| 500 | 430,271 (427,502-434,260) | 2.162 | 7.032 |
+| 1000 | 415,640 (411,050-418,459) | 4.351 | 15.783 |
+
+Node dispatches routes on a single goroutine in this path, which is why throughput at 500/1000 connections is lower than at 200. Enabling Security (Gate and Client) in this environment reduces throughput by 3%-7% and slightly increases P99 latency.
+
+Raw data and reproduction parameters are in the `cluster/tcp` scenario of [due-benchmark](https://github.com/dobyte/due-benchmark).
+
+### 14. Other Components
+
+1. Logging components
+    * file: github.com/dobyte/due/v2/log/file
+    * console: github.com/dobyte/due/v2/log/console
     * aliyun: github.com/dobyte/due/log/aliyun/v2
-    * tencent: github.com/dobyte/due/log/zap/v2
-2. 网络组件
+    * tencent: github.com/dobyte/due/log/tencent/v2
+2. Network components
     * ws: github.com/dobyte/due/network/ws/v2
     * tcp: github.com/dobyte/due/network/tcp/v2
     * kcp: github.com/dobyte/due/network/kcp/v2
-3. 注册发现
+    * quic: github.com/dobyte/due/network/quic/v2
+3. Registry and discovery
     * etcd: github.com/dobyte/due/registry/etcd/v2
     * consul: github.com/dobyte/due/registry/consul/v2
     * nacos: github.com/dobyte/due/registry/nacos/v2
-4. 传输组件
+    * polaris: github.com/dobyte/due/registry/polaris/v2
+4. Transport components
     * grpc: github.com/dobyte/due/transport/grpc/v2
     * rpcx: github.com/dobyte/due/transport/rpcx/v2
-5. 定位组件
+5. Location components
     * redis: github.com/dobyte/due/locate/redis/v2
-6. 事件总线
+6. Event buses
     * redis: github.com/dobyte/due/eventbus/redis/v2
     * nats: github.com/dobyte/due/eventbus/nats/v2
     * kafka: github.com/dobyte/due/eventbus/kafka/v2
-7. Web组件
+    * process: github.com/dobyte/due/v2/eventbus/process
+7. Common components
     * http: github.com/dobyte/due/component/http/v2
-8. 配置中心
-   * etcd: github.com/dobyte/due/config/etcd/v2
-   * consul: github.com/dobyte/due/config/consul/v2
-   * nacos: github.com/dobyte/due/config/nacos/v2
-9. 缓存组件
-   * redis: github.com/dobyte/due/cache/redis/v2
-   * memcache: github.com/dobyte/due/cache/memcache/v2
-10. 分布式锁组件
+    * pprof: github.com/dobyte/due/v2/component/pprof
+    * mqtt: github.com/dobyte/due/component/mqtt/v2
+8. Config centers
+    * file: github.com/dobyte/due/v2/config/file
+    * etcd: github.com/dobyte/due/config/etcd/v2
+    * consul: github.com/dobyte/due/config/consul/v2
+    * nacos: github.com/dobyte/due/config/nacos/v2
+    * polaris: github.com/dobyte/due/config/polaris/v2
+9. Cache components
+    * redis: github.com/dobyte/due/cache/redis/v2
+    * memcache: github.com/dobyte/due/cache/memcache/v2
+10. Distributed lock components
     * redis: github.com/dobyte/due/lock/redis/v2
     * memcache: github.com/dobyte/due/lock/memcache/v2
+11. Encryption/decryption components
+    * rsa: github.com/dobyte/due/crypto/rsa/v2
+    * ecc: github.com/dobyte/due/crypto/ecc/v2
 
-### 14.其他客户端
+> For the complete module list of each component, see "6. Module List".
+
+### 15. Other Clients
 
 * [due-client-ts](https://github.com/dobyte/due-client-ts)
-* [due-client-shape](https://github.com/dobyte/due-client-shape)
+* [due-client-csharp](https://github.com/dobyte/due-client-csharp)
+* [due-client-unity](https://github.com/dobyte/due-client-unity)
+* [due-client-cocos](https://github.com/dobyte/due-client-cocos)
+* [due-client-godot](https://github.com/dobyte/due-client-godot)
+* [due-client-laya](https://github.com/dobyte/due-client-laya)
 
-### 15.详细示例
+### 16. Detailed Examples
 
 - [due-examples](https://github.com/dobyte/due-examples)
 - [due-chat](https://github.com/dobyte/due-chat)
-- [due-doudizhu-server](https://github.com/dobyte/due-doudizhu-desc) 高性能分布式游戏服务器商业实战案例-斗地主服务器 (付费项目，购买请联系框架作者)
+- [due-doudizhu](https://github.com/dobyte/due-doudizhu-desc) A high-performance distributed game server commercial case study — the Doudizhu (Fight the Landlord) server
+- [due-fishing](https://github.com/dobyte/due-fishing-desc) A high-performance distributed game server commercial case study — the Bu Yu Da Shen (Fishing Master) server
 
-### 16.三方示例
+### 17. Third-party Examples
 
 <ul>
    <li style="line-height:30px;padding: 5px 0;">
@@ -703,7 +969,7 @@ throughput (TPS)     : 159147
    </li>
    <li style="line-height:30px;padding: 5px 0;">
       <a style="line-height: 30px;float: left;" href="https://github.com/Zekiee" target="_blank"><img alt="Zekiee" src="https://avatars.githubusercontent.com/u/69623693?v=4" style="width:30px;height:30px;display:block;border-radius:50%;"></a>
-      <a style="line-height: 30px;float: left;margin-left: 10px;" href="http://47.96.31.184:8089/" target="_blank">蝌蚪聊天室</a>
+      <a style="line-height: 30px;float: left;margin-left: 10px;" href="http://47.96.31.184:8089/" target="_blank">Tadpole Chat Room</a>
    </li>
    <li style="line-height:30px;padding: 5px 0;">
       <a style="line-height: 30px;float: left;" href="https://github.com/lingfan" target="_blank"><img alt="lingfan" src="https://avatars.githubusercontent.com/u/455872?v=4" style="width:30px;height:30px;display:block;border-radius:50%;"></a>
@@ -715,30 +981,52 @@ throughput (TPS)     : 159147
    </li>
 </ul>
 
-### 17.常见问题
+### 18. FAQ
 
-1. 框架主模块与子模块版本不一致的问题
+1. Inconsistent versions between the framework's main module and submodules
 
-   原因：由于框架采用的是模块化设计，每个模块都有自己的版本号，而主模块的版本号是所有子模块版本号的基础。因此，在使用框架时，需要注意主模块与子模块的版本号是否一致，否则可能会导致一些不可预料的问题。
+   Reason: Because the framework uses a modular design, each module has its own version number, and the main module's version number is the basis for all submodule version numbers. Therefore, when using the framework, you need to make sure that the main module and submodule versions are consistent; otherwise, unexpected problems may occur.
 
-   例如：due主模块版本为v2.3.2，而子模块lock/redis版本为v2.0.0-20250902100831-0402c3a6689f，这就会导致版本不一致的问题。
+   For example: the due main module version is v2.6.2, while the lock/redis submodule version is v2.0.0-20250902100831-0402c3a6689f, which causes a version inconsistency.
 
    ```text
-   github.com/dobyte/due/v2 v2.3.2
+   github.com/dobyte/due/v2 v2.6.2
    github.com/dobyte/due/lock/redis/v2 v2.0.0-20250902100831-0402c3a6689f
    ```
 
-   解决：
+   Solution:
 
-   1.进入到[release](https://github.com/dobyte/due/releases)页面，找到框架发布的版本号对应的commit号：93262b5。
+   1. Go to the [release](https://github.com/dobyte/due/releases) page and find the commit corresponding to the framework's released version: 4c547b1.
 
-   2.执行go get github.com/dobyte/due/lock/redis/v2@93262b5拉取与主模块本版对应的子模块。
+   2. Run `go get github.com/dobyte/due/lock/redis/v2@4c547b1` to fetch the submodule corresponding to the current main module version.
 
-   3.至此，问题解决。
+   3. The problem is now resolved.
+
+2. Environment requirements
+
+   The framework's main module requires Go 1.27 or later. In addition, the framework uses a multi-module design; submodules are not downloaded together with the main module and need to be imported on demand via `go get` (see "6. Module List" for import paths).
+
+3. Message buffer ownership
+
+   Message buffers in the network layer are allocated from a memory pool by default. The buffer ownership conventions for `Push` and `OnReceive` are as follows:
+
+   * `Push` returns nil: the buffer ownership has been transferred to the network layer, which is responsible for releasing it; the business layer must not use or release the buffer again.
+   * `Push` returns an error: the buffer still belongs to the caller, who must release it; otherwise, a memory leak will occur.
+   * Buffer in the `OnReceive` callback: it is the responsibility of the business layer to release; when this callback is not registered, the framework releases it automatically.
+
+   Note that the message body returned by `UnpackMessage` shares memory with the receive buffer (zero-copy). If you need to keep the message body after the callback returns (for example, for asynchronous processing, forwarding, or echoing), you must copy it first (e.g. with `bytes.Clone`) before using it; otherwise, that memory may have already been reclaimed and reused.
+
+4. Behavior when a gateway/node is closed
+
+   The gateway component's `Close` uses "wait for sessions to drain" semantics: it first sets its own state to `hang` and refreshes the registry, then waits for online sessions to exit naturally before proceeding to `Destroy`. Therefore, when there are many long connections, `Close` may take a long time; this is by design. If you need to stop the service quickly, you can first disconnect or force-close connections through the admin API.
+
+5. Notes on calling Close/Stop inside callbacks
+
+   Synchronously calling the server's `Stop` or a connection's `Close` inside a network callback may cause blocking; it is recommended to call it in a separate goroutine, or execute it asynchronously through mechanisms such as `AfterFunc`.
 
 
-### 18.交流与讨论
+### 19. Communication and Discussion
 
-<img title="" src="group_qrcode.jpeg" alt="交流群" width="175"><img title="" src="personal_qrcode.jpeg" alt="个人二维码" width="177">
+<img title="" src="assets/group_qrcode.jpeg" alt="Discussion Group" width="175"><img title="" src="assets/personal_qrcode.jpeg" alt="Personal QR Code" width="177">
 
-个人微信：yuebanfuxiao
+Personal WeChat: yuebanfuxiao

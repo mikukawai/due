@@ -1,21 +1,21 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/5/11 10:01 上午
- * @Desc: TODO
- */
-
 package network
 
+// Client is the client interface.
 type Client interface {
-	// Dial 拨号连接
+	// Dial dials a connection.
+	//
+	// When addr is empty the address from the client options is used.
 	Dial(addr ...string) (Conn, error)
-	// Protocol 协议
+	// Protocol returns the protocol name.
 	Protocol() string
-	// OnConnect 监听连接打开
+	// OnConnect registers the handler invoked when a connection is opened.
 	OnConnect(handler ConnectHandler)
-	// OnReceive 监听接收消息
+	// OnHeartbeat registers the handler invoked when a heartbeat is received.
+	OnHeartbeat(handler HeartbeatHandler)
+	// OnReceive registers the handler invoked when a message is received.
 	OnReceive(handler ReceiveHandler)
-	// OnDisconnect 监听连接断开
+	// OnHandshake registers the handler invoked when a handshake frame is received.
+	OnHandshake(handler HandshakeHandler)
+	// OnDisconnect registers the handler invoked when a connection is closed.
 	OnDisconnect(handler DisconnectHandler)
 }

@@ -3,42 +3,43 @@ package redis
 import (
 	"context"
 	"fmt"
-	"slices"
-	"strings"
 	"sync"
 
 	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/core/tls"
-	"github.com/dobyte/due/v2/encoding/json"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/locate"
 	"github.com/dobyte/due/v2/log"
 	"github.com/redis/go-redis/v9"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
-	userGateKey     = "%s:locate:user:%d:gate"     // string
-	userNodeKey     = "%s:locate:user:%d:node"     // hash
-	clusterEventKey = "%s:locate:cluster:%s:event" // channel
+	userGateKey     = "%s:locate:user:%d:gate"           // string
+	userNodeKey     = "%s:locate:user:%d:node"           // hash
+	clusterEventKey = "%s:locate:db:%d:cluster:%s:event" // channel
 )
 
 const name = "redis"
 
 var _ locate.Locator = &Locator{}
 
+// Locator is a redis locator.
 type Locator struct {
 	err              error
 	opts             *options
 	builtin          bool
 	ctx              context.Context
 	cancel           context.CancelFunc
-	sfg              singleflight.Group
+	mu               sync.Mutex
 	watchers         sync.Map
 	unbindGateScript *redis.Script
 	unbindNodeScript *redis.Script
 }
 
+// NewLocator creates a redis locator.
+//
+// It initializes the locator and a built-in redis client; when no external client is injected it
+// connects to 127.0.0.1:6379 by default.
 func NewLocator(opts ...Option) *Locator {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -77,12 +78,14 @@ func NewLocator(opts ...Option) *Locator {
 	return l
 }
 
-// Name 获取定位器组件名
+// Name returns the component name of the locator.
 func (l *Locator) Name() string {
 	return name
 }
 
-// LocateGate 定位用户所在网关
+// LocateGate locates the gate the user belongs to.
+//
+// It returns the gate ID of the user and an error when the lookup fails.
 func (l *Locator) LocateGate(ctx context.Context, uid int64) (string, error) {
 	if l.err != nil {
 		return "", l.err
@@ -90,22 +93,16 @@ func (l *Locator) LocateGate(ctx context.Context, uid int64) (string, error) {
 
 	key := fmt.Sprintf(userGateKey, l.opts.prefix, uid)
 
-	val, err, _ := l.sfg.Do(key, func() (any, error) {
-		val, err := l.opts.client.Get(ctx, key).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return "", err
-		}
-
-		return val, nil
-	})
-	if err != nil {
+	if val, err := l.opts.client.Get(ctx, key).Result(); err != nil && !errors.Is(err, redis.Nil) {
 		return "", err
+	} else {
+		return val, nil
 	}
-
-	return val.(string), nil
 }
 
-// LocateNode 定位用户所在节点
+// LocateNode locates the node the user belongs to.
+//
+// It returns the node ID of the user and an error when the lookup fails.
 func (l *Locator) LocateNode(ctx context.Context, uid int64, name string) (string, error) {
 	if l.err != nil {
 		return "", l.err
@@ -113,22 +110,17 @@ func (l *Locator) LocateNode(ctx context.Context, uid int64, name string) (strin
 
 	key := fmt.Sprintf(userNodeKey, l.opts.prefix, uid)
 
-	val, err, _ := l.sfg.Do(key+name, func() (any, error) {
-		val, err := l.opts.client.HGet(ctx, key, name).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return "", err
-		}
-
-		return val, nil
-	})
-	if err != nil {
+	if val, err := l.opts.client.HGet(ctx, key, name).Result(); err != nil && !errors.Is(err, redis.Nil) {
 		return "", err
+	} else {
+		return val, nil
 	}
-
-	return val.(string), nil
 }
 
-// LocateNodes 定位用户所在节点列表
+// LocateNodes locates the nodes the user belongs to.
+//
+// It returns a mapping from the node names the user is bound to, to their node IDs, and an error
+// when the lookup fails.
 func (l *Locator) LocateNodes(ctx context.Context, uid int64) (map[string]string, error) {
 	if l.err != nil {
 		return nil, l.err
@@ -136,22 +128,12 @@ func (l *Locator) LocateNodes(ctx context.Context, uid int64) (map[string]string
 
 	key := fmt.Sprintf(userNodeKey, l.opts.prefix, uid)
 
-	val, err, _ := l.sfg.Do(key, func() (any, error) {
-		val, err := l.opts.client.HGetAll(ctx, key).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return nil, err
-		}
-
-		return val, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return val.(map[string]string), nil
+	return l.opts.client.HGetAll(ctx, key).Result()
 }
 
-// BindGate 绑定网关
+// BindGate binds the user to a gate.
+//
+// It returns an error when binding fails.
 func (l *Locator) BindGate(ctx context.Context, uid int64, gid string) error {
 	if l.err != nil {
 		return l.err
@@ -170,7 +152,9 @@ func (l *Locator) BindGate(ctx context.Context, uid int64, gid string) error {
 	return nil
 }
 
-// BindNode 绑定节点
+// BindNode binds the user to a node.
+//
+// It returns an error when binding fails.
 func (l *Locator) BindNode(ctx context.Context, uid int64, name, nid string) error {
 	if l.err != nil {
 		return l.err
@@ -189,7 +173,9 @@ func (l *Locator) BindNode(ctx context.Context, uid int64, name, nid string) err
 	return nil
 }
 
-// UnbindGate 解绑网关
+// UnbindGate unbinds the user from a gate.
+//
+// It returns an error when unbinding fails.
 func (l *Locator) UnbindGate(ctx context.Context, uid int64, gid string) error {
 	if l.err != nil {
 		return l.err
@@ -202,7 +188,7 @@ func (l *Locator) UnbindGate(ctx context.Context, uid int64, gid string) error {
 		return err
 	}
 
-	if rst[0] == "OK" {
+	if len(rst) > 0 && rst[0] == "OK" {
 		if err = l.broadcast(ctx, locate.UnbindGate, uid, gid); err != nil {
 			log.Errorf("location event broadcast failed: %v", err)
 		}
@@ -211,7 +197,9 @@ func (l *Locator) UnbindGate(ctx context.Context, uid int64, gid string) error {
 	return nil
 }
 
-// UnbindNode 解绑节点
+// UnbindNode unbinds the user from a node.
+//
+// It returns an error when unbinding fails.
 func (l *Locator) UnbindNode(ctx context.Context, uid int64, name, nid string) error {
 	if l.err != nil {
 		return l.err
@@ -224,7 +212,7 @@ func (l *Locator) UnbindNode(ctx context.Context, uid int64, name, nid string) e
 		return err
 	}
 
-	if rst[0] == "OK" {
+	if len(rst) > 0 && rst[0] == "OK" {
 		if err = l.broadcast(ctx, locate.UnbindNode, uid, nid, name); err != nil {
 			log.Errorf("location event broadcast failed: %v", err)
 		}
@@ -233,7 +221,36 @@ func (l *Locator) UnbindNode(ctx context.Context, uid int64, name, nid string) e
 	return nil
 }
 
-// 广播事件
+// Close closes the locator.
+//
+// It returns an error when closing fails.
+func (l *Locator) Close() error {
+	if l.err != nil {
+		return l.err
+	}
+
+	l.cancel()
+
+	l.watchers.Range(func(key, value any) bool {
+		if wm, ok := value.(*watcherMgr); ok {
+			wm.cancel()
+			wm.wg.Wait()
+		}
+		l.watchers.Delete(key)
+		return true
+	})
+
+	if l.builtin {
+		return l.opts.client.Close()
+	}
+
+	return nil
+}
+
+// broadcast broadcasts a locate event.
+//
+// It broadcasts a locate event to every listener through redis publish/subscribe and returns an
+// error when broadcasting fails.
 func (l *Locator) broadcast(ctx context.Context, typ locate.EventType, uid int64, insID string, insName ...string) error {
 	evt := &locate.Event{UID: uid, Type: typ, InsID: insID}
 
@@ -253,53 +270,59 @@ func (l *Locator) broadcast(ctx context.Context, typ locate.EventType, uid int64
 		return err
 	}
 
-	return l.opts.client.Publish(ctx, fmt.Sprintf(clusterEventKey, l.opts.prefix, evt.InsKind), msg).Err()
+	return l.opts.client.Publish(ctx, fmt.Sprintf(clusterEventKey, l.opts.prefix, l.opts.db, evt.InsKind), msg).Err()
 }
 
-func (l *Locator) toUniqueKey(kinds ...string) string {
-	slices.Sort(kinds)
-
-	return strings.Join(kinds, "&")
-}
-
-// Watch 监听用户定位变化
+// Watch watches changes of user locations.
+//
+// It returns a locate watcher and an error when watching fails.
 func (l *Locator) Watch(ctx context.Context, kinds ...string) (locate.Watcher, error) {
 	if l.err != nil {
 		return nil, l.err
 	}
 
-	key := l.toUniqueKey(kinds...)
+	mgr, err := l.doBuildWatcherMgr(kinds...)
+	if err != nil {
+		return nil, err
+	}
+
+	return mgr.fork()
+}
+
+// doBuildWatcherMgr builds a locate watch manager.
+//
+// It reuses the watch manager of the same combination of instance kinds and creates a new one when
+// none exists.
+//
+// It returns the locate watch manager and an error when building fails.
+func (l *Locator) doBuildWatcherMgr(kinds ...string) (*watcherMgr, error) {
+	key := toUniqueKey(kinds...)
 
 	v, ok := l.watchers.Load(key)
 	if ok {
-		return v.(*watcherMgr).fork(), nil
+		return v.(*watcherMgr), nil
 	}
 
-	w, err := newWatcherMgr(ctx, l, key, kinds...)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if v, ok = l.watchers.Load(key); ok {
+		return v.(*watcherMgr), nil
+	}
+
+	mgr, err := newWatcherMgr(l, key, kinds...)
 	if err != nil {
 		return nil, err
 	}
 
-	l.watchers.Store(key, w)
+	l.watchers.Store(key, mgr)
 
-	return w.fork(), nil
-}
-
-func marshal(event *locate.Event) (string, error) {
-	buf, err := json.Marshal(event)
-	if err != nil {
-		return "", err
+	// Handle the race where the receiving goroutine has already stopped because the reconnect
+	// failed completely before Store.
+	if mgr.stopped.Load() {
+		l.watchers.Delete(key)
+		return nil, errors.ErrWatcherStopped
 	}
 
-	return string(buf), nil
-}
-
-func unmarshal(data []byte) (*locate.Event, error) {
-	evt := &locate.Event{}
-
-	if err := json.Unmarshal(data, evt); err != nil {
-		return nil, err
-	}
-
-	return evt, nil
+	return mgr, nil
 }

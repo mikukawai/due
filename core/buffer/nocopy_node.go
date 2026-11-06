@@ -1,19 +1,13 @@
 package buffer
 
+// NocopyNode is a zero-copy buffer node.
 type NocopyNode struct {
-	prev  any
 	next  any
 	block any
 }
 
-var _ Buffer = (*NocopyNode)(nil)
-
-// Len 获取字节长度
+// Len returns the byte length.
 func (n *NocopyNode) Len() int {
-	if n == nil {
-		return 0
-	}
-
 	switch b := n.block.(type) {
 	case []byte:
 		return len(b)
@@ -26,12 +20,13 @@ func (n *NocopyNode) Len() int {
 	}
 }
 
-// Bytes 获取该节点的字节数据
-func (n *NocopyNode) Bytes() []byte {
-	if n == nil {
-		return nil
-	}
+// Nodes returns the number of nodes.
+func (n *NocopyNode) Nodes() int {
+	return 1
+}
 
+// Bytes returns the byte data of the node.
+func (n *NocopyNode) Bytes() []byte {
 	switch b := n.block.(type) {
 	case []byte:
 		return b
@@ -44,12 +39,26 @@ func (n *NocopyNode) Bytes() []byte {
 	}
 }
 
-// Release 释放
-func (n *NocopyNode) Release() {
-	if n == nil {
-		return
+// Slide consumes the given number of bytes.
+func (n *NocopyNode) Slide(delta int) bool {
+	switch b := n.block.(type) {
+	case []byte:
+		if delta < 0 || delta > len(b) {
+			return false
+		}
+		n.block = b[delta:]
+		return true
+	case *Bytes:
+		return b.Slide(delta)
+	case *Writer:
+		return b.Slide(delta)
+	default:
+		return false
 	}
+}
 
+// Release releases the node.
+func (n *NocopyNode) Release() {
 	switch b := n.block.(type) {
 	case []byte:
 		// ignore
@@ -59,7 +68,6 @@ func (n *NocopyNode) Release() {
 		b.Release()
 	}
 
-	n.prev = nil
 	n.next = nil
 	n.block = nil
 }

@@ -13,8 +13,10 @@ import (
 	"github.com/dobyte/due/v2/utils/xos"
 )
 
+// Name is the name of the file config source.
 const Name = "file"
 
+// Source is a file-based config source.
 type Source struct {
 	path string
 	mode config.Mode
@@ -22,16 +24,18 @@ type Source struct {
 
 var _ config.Source = &Source{}
 
+// NewSource returns a file-based config source rooted at path with the given mode.
 func NewSource(path string, mode config.Mode) *Source {
 	return &Source{path: strings.TrimSuffix(path, "/"), mode: mode}
 }
 
-// Name 配置源名称
+// Name returns the name of the source.
 func (s *Source) Name() string {
 	return Name
 }
 
-// Load 加载配置
+// Load loads the configurations of the given files, or every file under the source path when file
+// is empty.
 func (s *Source) Load(ctx context.Context, file ...string) ([]*config.Configuration, error) {
 	path := s.path
 
@@ -43,6 +47,10 @@ func (s *Source) Load(ctx context.Context, file ...string) ([]*config.Configurat
 
 		if !info.IsDir() {
 			return nil, errors.New("the specified file cannot be loaded at the file path")
+		}
+
+		if err = checkFilePath(s.path, file[0]); err != nil {
+			return nil, err
 		}
 
 		path = filepath.Join(s.path, file[0])
@@ -65,7 +73,7 @@ func (s *Source) Load(ctx context.Context, file ...string) ([]*config.Configurat
 	return []*config.Configuration{c}, nil
 }
 
-// Store 保存配置项
+// Store saves content as file under the source path.
 func (s *Source) Store(ctx context.Context, file string, content []byte) error {
 	if s.mode != config.WriteOnly && s.mode != config.ReadWrite {
 		return errors.ErrNoOperationPermission
@@ -80,19 +88,59 @@ func (s *Source) Store(ctx context.Context, file string, content []byte) error {
 		return errors.New("the specified file cannot be modified under the file path")
 	}
 
+	if err = checkFilePath(s.path, file); err != nil {
+		return err
+	}
+
 	return xos.WriteFile(filepath.Join(s.path, file), content)
 }
 
-// Watch 监听配置变化
+// checkFilePath validates that file is a safe path under root; it rejects absolute paths and paths
+// containing "..".
+func checkFilePath(root, file string) error {
+	if file == "" {
+		return errors.New("invalid file path: empty")
+	}
+
+	if filepath.IsAbs(file) {
+		return errors.New("invalid file path: absolute path is not allowed")
+	}
+
+	for _, item := range strings.Split(filepath.ToSlash(file), "/") {
+		if item == ".." {
+			return errors.New("invalid file path: directory traversal is not allowed")
+		}
+	}
+
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+
+	absTarget, err := filepath.Abs(filepath.Join(root, file))
+	if err != nil {
+		return err
+	}
+
+	rel, err := filepath.Rel(absRoot, absTarget)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return errors.New("invalid file path: directory traversal is not allowed")
+	}
+
+	return nil
+}
+
+// Watch starts watching the source path and returns a [config.Watcher].
 func (s *Source) Watch(ctx context.Context) (config.Watcher, error) {
 	return newWatcher(ctx, s)
 }
 
+// Close closes the source.
 func (s *Source) Close() error {
 	return nil
 }
 
-// 加载文件配置
+// loadFile loads a single config file.
 func (s *Source) loadFile(path string) (*config.Configuration, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -111,13 +159,31 @@ func (s *Source) loadFile(path string) (*config.Configuration, error) {
 	}
 
 	ext := filepath.Ext(info.Name())
-	path1, _ := filepath.Abs(path)
-	path2, _ := filepath.Abs(s.path)
-	path = strings.TrimPrefix(path1, path2)
-	fullPath := s.path + path
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+
+	absRoot, err := filepath.Abs(s.path)
+	if err != nil {
+		return nil, err
+	}
+
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// In single-file mode the relative path is the current directory, so use the file name as the path.
+	fullPath := filepath.Join(s.path, rel)
+	if rel == "." {
+		rel = info.Name()
+		fullPath = s.path
+	}
 
 	return &config.Configuration{
-		Path:     path,
+		Path:     rel,
 		File:     info.Name(),
 		Name:     strings.TrimSuffix(info.Name(), ext),
 		Format:   strings.TrimPrefix(ext, "."),
@@ -126,7 +192,7 @@ func (s *Source) loadFile(path string) (*config.Configuration, error) {
 	}, nil
 }
 
-// 加载目录配置
+// loadDir loads every config file under path.
 func (s *Source) loadDir(path string) (cs []*config.Configuration, err error) {
 	err = filepath.WalkDir(path, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {

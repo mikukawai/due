@@ -2,19 +2,18 @@ package internal
 
 import (
 	"bytes"
-	"strconv"
 	"sync"
 )
 
 type TextFormatter struct {
-	pool    *sync.Pool
-	console bool
+	pool           *sync.Pool
+	isSupportColor bool
 }
 
-func NewTextFormatter(console ...bool) *TextFormatter {
+func NewTextFormatter(isSupportColor ...bool) *TextFormatter {
 	return &TextFormatter{
-		pool:    &sync.Pool{New: func() any { return &buffer{bufer: bytes.NewBuffer(make([]byte, 0, 1024))} }},
-		console: len(console) > 0 && console[0],
+		pool:           &sync.Pool{New: func() any { return &buffer{bufer: bytes.NewBuffer(make([]byte, 0, defaultBufferSize))} }},
+		isSupportColor: len(isSupportColor) > 0 && isSupportColor[0],
 	}
 }
 
@@ -22,7 +21,7 @@ func (f *TextFormatter) Format(entity *Entity) Buffer {
 	b := f.pool.Get().(*buffer)
 	b.pool = f.pool
 
-	if f.console {
+	if f.isSupportColor {
 		b.WriteString(entity.Level.Color())
 		b.WriteString(entity.Level.Label())
 		b.WriteString(reset)
@@ -48,13 +47,13 @@ func (f *TextFormatter) Format(entity *Entity) Buffer {
 		b.WriteString("\nStack:")
 		for i, frame := range entity.Frames {
 			b.WriteByte('\n')
-			b.WriteString(strconv.Itoa(i + 1))
+			b.WriteInt(i + 1)
 			b.WriteString(".")
 			b.WriteString(frame.Function)
 			b.WriteString("\n\t")
 			b.WriteString(frame.File)
 			b.WriteString(":")
-			b.WriteString(strconv.Itoa(frame.Line))
+			b.WriteInt(frame.Line)
 		}
 	}
 

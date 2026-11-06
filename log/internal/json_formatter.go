@@ -17,14 +17,12 @@ const (
 )
 
 type JsonFormatter struct {
-	pool    *sync.Pool
-	console bool
+	pool *sync.Pool
 }
 
-func NewJsonFormatter(console ...bool) *JsonFormatter {
+func NewJsonFormatter() *JsonFormatter {
 	return &JsonFormatter{
-		pool:    &sync.Pool{New: func() any { return &buffer{bufer: bytes.NewBuffer(make([]byte, 0, 1024))} }},
-		console: len(console) > 0 && console[0],
+		pool: &sync.Pool{New: func() any { return &buffer{bufer: bytes.NewBuffer(make([]byte, 0, defaultBufferSize))} }},
 	}
 }
 
@@ -34,36 +32,26 @@ func (f *JsonFormatter) Format(entity *Entity) Buffer {
 
 	b.WriteString(`{"`)
 	b.WriteString(fieldKeyLevel)
-	b.WriteString(`":"`)
+	b.WriteString(`":`)
+	writeJSONString(b, entity.Level.Label())
 
-	if f.console {
-		b.WriteString(entity.Level.Color())
-		b.WriteString(entity.Level.Label())
-		b.WriteString(reset)
-	} else {
-		b.WriteString(entity.Level.Label())
-	}
-
-	b.WriteString(`","`)
+	b.WriteString(`,"`)
 	b.WriteString(fieldKeyTime)
-	b.WriteString(`":"`)
-	b.WriteString(entity.Time)
-	b.WriteString(`"`)
+	b.WriteString(`":`)
+	writeJSONString(b, entity.Time)
 
 	if entity.Caller != "" {
 		b.WriteString(`,"`)
 		b.WriteString(fieldKeyFile)
-		b.WriteString(`":"`)
-		b.WriteString(entity.Caller)
-		b.WriteString(`"`)
+		b.WriteString(`":`)
+		writeJSONString(b, entity.Caller)
 	}
 
 	if entity.Message != "" {
 		b.WriteString(`,"`)
 		b.WriteString(fieldKeyMsg)
-		b.WriteString(`":"`)
-		b.WriteString(entity.Message)
-		b.WriteString(`"`)
+		b.WriteString(`":`)
+		writeJSONString(b, entity.Message)
 	}
 
 	if len(entity.Frames) > 0 {
@@ -71,26 +59,18 @@ func (f *JsonFormatter) Format(entity *Entity) Buffer {
 		b.WriteString(fieldKeyStack)
 		b.WriteString(`":[`)
 		for i, frame := range entity.Frames {
-			if i == 0 {
-				b.WriteString(`{"`)
-				b.WriteString(fieldKeyStackFunc)
-				b.WriteString(`":"`)
-				b.WriteString(frame.Function)
-				b.WriteString(`"`)
-			} else {
-				b.WriteString(`,{"`)
-				b.WriteString(fieldKeyStackFunc)
-				b.WriteString(`":"`)
-				b.WriteString(frame.Function)
-				b.WriteString(`"`)
+			if i > 0 {
+				b.WriteByte(',')
 			}
+			b.WriteString(`{"`)
+			b.WriteString(fieldKeyStackFunc)
+			b.WriteString(`":`)
+			writeJSONString(b, frame.Function)
 			b.WriteString(`,"`)
 			b.WriteString(fieldKeyStackFile)
-			b.WriteString(`":"`)
-			b.WriteString(frame.File)
-			b.WriteString(`:`)
-			b.WriteString(strconv.Itoa(frame.Line))
-			b.WriteString(`"`)
+			b.WriteString(`":`)
+			writeJSONString(b, frame.File+":"+strconv.Itoa(frame.Line))
+			b.WriteString(`}`)
 		}
 		b.WriteString(`]`)
 	}
@@ -98,4 +78,40 @@ func (f *JsonFormatter) Format(entity *Entity) Buffer {
 	b.WriteString("}\n")
 
 	return b
+}
+
+func writeJSONString(b *buffer, s string) {
+	const hex = "0123456789abcdef"
+
+	b.WriteByte('"')
+	for i := range len(s) {
+		c := s[i]
+		switch c {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '<':
+			b.WriteString(`\u003c`)
+		case '>':
+			b.WriteString(`\u003e`)
+		case '&':
+			b.WriteString(`\u0026`)
+		default:
+			if c < 0x20 {
+				b.WriteString(`\u00`)
+				b.WriteByte(hex[c>>4])
+				b.WriteByte(hex[c&0x0f])
+			} else {
+				b.WriteByte(c)
+			}
+		}
+	}
+	b.WriteByte('"')
 }

@@ -7,6 +7,11 @@ import (
 	"github.com/dobyte/due/v2/utils/xreflect"
 )
 
+// Json converts val to a JSON string.
+//
+// A string or byte slice that already looks like JSON (wrapped in { } or [ ]) is returned as is;
+// maps, arrays, slices, structs and the like are JSON-marshalled; other types yield an empty
+// string.
 func Json(val any) string {
 	isJson := func(s string) bool {
 		l := len(s)
@@ -19,6 +24,9 @@ func Json(val any) string {
 			return v
 		}
 	case *string:
+		if v == nil {
+			return ""
+		}
 		if isJson(*v) {
 			return *v
 		}
@@ -27,6 +35,9 @@ func Json(val any) string {
 			return s
 		}
 	case *[]byte:
+		if v == nil {
+			return ""
+		}
 		if s := BytesToString(*v); isJson(s) {
 			return s
 		}

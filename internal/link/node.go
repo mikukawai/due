@@ -13,25 +13,37 @@ import (
 	"github.com/dobyte/due/v2/internal/transporter/node"
 	"github.com/dobyte/due/v2/locate"
 	"github.com/dobyte/due/v2/log"
-	"github.com/dobyte/due/v2/packet"
 	"github.com/dobyte/due/v2/registry"
 	"golang.org/x/sync/errgroup"
 )
 
+// sourceShardNum is the number of shards in the user source node cache. It is a power of two so
+// that a bitwise AND can select a shard.
+const sourceShardNum = 256
+
+// sourceShard is one shard of the user source node cache.
+//
+// Shards are selected by hashing the low bits of the UID to reduce contention on the read-write
+// lock. The trailing padding fills the struct up to a 64-byte cache line so that adjacent shards
+// do not suffer from false sharing.
+type sourceShard struct {
+	rw      sync.RWMutex
+	sources map[int64]map[string]string
+	_       [32]byte
+}
+
 type NodeLinker struct {
-	ctx        context.Context             // 上下文
-	opts       *Options                    // 参数项
-	builder    *node.Builder               // 构建器
-	dispatcher *dispatcher.Dispatcher      // 分发器
-	rw         sync.RWMutex                // 锁
-	sources    map[int64]map[string]string // 用户来源节点
+	ctx        context.Context             // Context
+	opts       *Options                    // Options
+	builder    *node.Builder               // Builder
+	dispatcher *dispatcher.Dispatcher      // Dispatcher
+	shards     [sourceShardNum]sourceShard // User source node cache shards
 }
 
 func NewNodeLinker(ctx context.Context, opts *Options) *NodeLinker {
-	return &NodeLinker{
+	l := &NodeLinker{
 		ctx:        ctx,
 		opts:       opts,
-		sources:    make(map[int64]map[string]string),
 		dispatcher: dispatcher.NewDispatcher(opts.Dispatch),
 		builder: node.NewBuilder(&node.ClientOptions{
 			ID:                opts.ID,
@@ -40,20 +52,32 @@ func NewNodeLinker(ctx context.Context, opts *Options) *NodeLinker {
 			CallTimeout:       opts.CallTimeout,
 			DialTimeout:       opts.DialTimeout,
 			DialRetryTimes:    opts.DialRetryTimes,
-			WriteTimeout:      opts.WriteTimeout,
-			WriteQueueSize:    opts.WriteQueueSize,
+			WriteTimeout:      opts.CommandWriteTimeout,
+			WriteQueueSize:    opts.CommandQueueSize,
 			FaultRecoveryTime: opts.FaultRecoveryTime,
 		}),
 	}
+
+	for i := range l.shards {
+		l.shards[i].sources = make(map[int64]map[string]string)
+	}
+
+	return l
 }
 
-// HasNode 检测是否存在某个节点
+// shard returns the source cache shard that owns uid.
+func (l *NodeLinker) shard(uid int64) *sourceShard {
+	return &l.shards[uint64(uid)&(sourceShardNum-1)]
+}
+
+// HasNode reports whether the node identified by nid exists.
 func (l *NodeLinker) HasNode(nid string) bool {
 	_, err := l.dispatcher.FindEndpoint(nid)
 	return err == nil
 }
 
-// AskNode 检测用户是否在给定的节点上
+// AskNode reports whether the user is located on the node with the given name and instance ID
+// nid.
 func (l *NodeLinker) AskNode(ctx context.Context, uid int64, name, nid string) (string, bool, error) {
 	if l.opts.Locator == nil {
 		return "", false, errors.ErrNotFoundLocator
@@ -77,7 +101,7 @@ func (l *NodeLinker) AskNode(ctx context.Context, uid int64, name, nid string) (
 	return insID, insID == nid, nil
 }
 
-// LocateNode 定位用户所在节点
+// LocateNode returns the node where the user is located.
 func (l *NodeLinker) LocateNode(ctx context.Context, uid int64, name string) (string, error) {
 	if l.opts.Locator == nil {
 		return "", errors.ErrNotFoundLocator
@@ -102,7 +126,7 @@ func (l *NodeLinker) LocateNode(ctx context.Context, uid int64, name string) (st
 	return nid, nil
 }
 
-// LocateNodes 定位用户所在节点列表
+// LocateNodes returns the list of nodes where the user is located.
 func (l *NodeLinker) LocateNodes(ctx context.Context, uid int64) (map[string]string, error) {
 	if l.opts.Locator == nil {
 		return nil, errors.ErrNotFoundLocator
@@ -111,9 +135,11 @@ func (l *NodeLinker) LocateNodes(ctx context.Context, uid int64) (map[string]str
 	return l.opts.Locator.LocateNodes(ctx, uid)
 }
 
-// BindNode 绑定节点
-// 单个用户可以绑定到多个节点服务器上，相同名称的节点服务器只能绑定一个，多次绑定会到相同名称的节点服务器会覆盖之前的绑定。
-// 绑定操作会通过发布订阅方式同步到网关服务器和其他相关节点服务器上。
+// BindNode binds the user to the node with the given name and instance ID nid.
+//
+// A user may be bound to multiple node servers, but only one server per name. Binding to a server
+// with the same name again overwrites the previous binding. The binding is propagated to the gate
+// servers and other related node servers through publish-subscribe.
 func (l *NodeLinker) BindNode(ctx context.Context, uid int64, name, nid string) error {
 	if l.opts.Locator == nil {
 		return errors.ErrNotFoundLocator
@@ -128,9 +154,11 @@ func (l *NodeLinker) BindNode(ctx context.Context, uid int64, name, nid string) 
 	return nil
 }
 
-// UnbindNode 解绑节点
-// 解绑时会对对应名称的节点服务器进行解绑，解绑时会对解绑节点ID进行校验，不匹配则解绑失败。
-// 解绑操作会通过发布订阅方式同步到网关服务器和其他相关节点服务器上。
+// UnbindNode unbinds the user from the node with the given name.
+//
+// The node instance ID is verified while unbinding, and the unbind fails when nid does not match.
+// The unbind is propagated to the gate servers and other related node servers through
+// publish-subscribe.
 func (l *NodeLinker) UnbindNode(ctx context.Context, uid int64, name, nid string) error {
 	if l.opts.Locator == nil {
 		return errors.ErrNotFoundLocator
@@ -145,7 +173,7 @@ func (l *NodeLinker) UnbindNode(ctx context.Context, uid int64, name, nid string
 	return nil
 }
 
-// FetchNodeList 拉取节点列表
+// FetchNodeList returns the node services, optionally filtered by states.
 func (l *NodeLinker) FetchNodeList(ctx context.Context, states ...cluster.State) ([]*registry.ServiceInstance, error) {
 	services, err := l.opts.Registry.Services(ctx, cluster.Node.String())
 	if err != nil {
@@ -171,7 +199,7 @@ func (l *NodeLinker) FetchNodeList(ctx context.Context, states ...cluster.State)
 	return list, nil
 }
 
-// Deliver 投递消息给节点处理
+// Deliver delivers a message to a node for handling.
 func (l *NodeLinker) Deliver(ctx context.Context, args *DeliverArgs) error {
 	var (
 		err       error
@@ -181,12 +209,11 @@ func (l *NodeLinker) Deliver(ctx context.Context, args *DeliverArgs) error {
 
 	switch b := args.Buffer.(type) {
 	case []byte:
-		buf = buffer.NewNocopyBuffer(b)
+		buf = buffer.NewBytes(b)
 	case buffer.Buffer:
 		buf = b
 	case *Message:
 		if buf, err = l.PackMessage(b, false); err != nil {
-			buf.Release()
 			return err
 		}
 	default:
@@ -220,7 +247,13 @@ func (l *NodeLinker) Deliver(ctx context.Context, args *DeliverArgs) error {
 	}
 }
 
-// Trigger 触发事件
+// Trigger triggers an event on every node subscribed to it.
+//
+// Events are triggered on nodes in parallel, so that dialing or a blocked write queue on one node
+// does not slow down delivery to the others. The call waits in the background for all nodes to
+// finish and releases the context derived by the errgroup to avoid a context leak. Failures on
+// individual nodes are logged at the error level rather than requiring the remaining nodes to
+// complete first.
 func (l *NodeLinker) Trigger(ctx context.Context, args *TriggerArgs) error {
 	event, err := l.dispatcher.FindEvent(int(args.Event))
 	if err != nil {
@@ -229,15 +262,16 @@ func (l *NodeLinker) Trigger(ctx context.Context, args *TriggerArgs) error {
 
 	eg, ctx := errgroup.WithContext(ctx)
 
-	event.VisitEndpoints(func(_ string, ep *endpoint.Endpoint) bool {
+	event.VisitEndpoints(func(insID string, ep *endpoint.Endpoint) bool {
 		eg.Go(func() error {
 			client, err := l.builder.Build(ep.Address())
 			if err != nil {
-				return err
+				log.Warnf("build node client failed, nid: %s, addr: %s, event: %v, cid: %d, uid: %d, err: %v", insID, ep.Address(), args.Event, args.CID, args.UID, err)
+				return nil
 			}
 
 			if err = client.Trigger(ctx, args.Event, args.CID, args.UID); err != nil {
-				return err
+				log.Warnf("trigger event failed, nid: %s, event: %v, cid: %d, uid: %d, err: %v", insID, args.Event, args.CID, args.UID, err)
 			}
 
 			return nil
@@ -246,10 +280,10 @@ func (l *NodeLinker) Trigger(ctx context.Context, args *TriggerArgs) error {
 		return true
 	})
 
-	return nil
+	return eg.Wait()
 }
 
-// GetState 获取节点状态
+// GetState returns the state of the node identified by nid.
 func (l *NodeLinker) GetState(ctx context.Context, nid string) (cluster.State, error) {
 	client, err := l.doBuildClient(nid)
 	if err != nil {
@@ -259,7 +293,7 @@ func (l *NodeLinker) GetState(ctx context.Context, nid string) (cluster.State, e
 	return client.GetState(ctx)
 }
 
-// SetState 设置节点状态
+// SetState sets the state of the node identified by nid.
 func (l *NodeLinker) SetState(ctx context.Context, nid string, state cluster.State) error {
 	client, err := l.doBuildClient(nid)
 	if err != nil {
@@ -269,7 +303,7 @@ func (l *NodeLinker) SetState(ctx context.Context, nid string, state cluster.Sta
 	return client.SetState(ctx, state)
 }
 
-// 执行节点RPC调用
+// doRPC performs an RPC call against a node selected by the given route.
 func (l *NodeLinker) doRPC(ctx context.Context, routeID int32, uid int64, fn func(ctx context.Context, client *node.Client) (bool, any, error)) (any, error) {
 	var (
 		err       error
@@ -328,7 +362,7 @@ func (l *NodeLinker) doRPC(ctx context.Context, routeID int32, uid int64, fn fun
 	return reply, err
 }
 
-// 构建节点客户端
+// doBuildClient builds a node client for the given instance ID.
 func (l *NodeLinker) doBuildClient(nid string) (*node.Client, error) {
 	if nid == "" {
 		return nil, errors.ErrInvalidNID
@@ -342,49 +376,25 @@ func (l *NodeLinker) doBuildClient(nid string) (*node.Client, error) {
 	return l.builder.Build(ep.Address())
 }
 
-// 打包消息
-func (l *NodeLinker) PackMessage(message *Message, encrypt bool) (*buffer.NocopyBuffer, error) {
-	buffer, err := l.PackBuffer(message.Data, encrypt)
-	if err != nil {
-		return nil, err
-	}
-
-	return packet.PackBuffer(&packet.Message{
-		Seq:    message.Seq,
-		Route:  message.Route,
-		Buffer: buffer,
-	})
+// PackMessage packs a message into a buffer, optionally encrypting its payload.
+func (l *NodeLinker) PackMessage(message *Message, encrypt bool) (buffer.Buffer, error) {
+	return packMessage(l.opts.Codec, l.opts.Encryptor, message, encrypt, 0)
 }
 
-// 消息转buffer
-func (l *NodeLinker) PackBuffer(message any, encrypt bool) ([]byte, error) {
-	if message == nil {
-		return nil, nil
-	}
-
-	if v, ok := message.([]byte); ok {
-		return v, nil
-	}
-
-	data, err := l.opts.Codec.Marshal(message)
-	if err != nil {
-		return nil, err
-	}
-
-	if encrypt && l.opts.Encryptor != nil {
-		return l.opts.Encryptor.Encrypt(data)
-	}
-
-	return data, nil
+// doPackBuffer encodes message, encrypting the encoded bytes when encrypt is true.
+func (l *NodeLinker) doPackBuffer(message any, encrypt bool) ([]byte, error) {
+	return packBuffer(l.opts.Codec, l.opts.Encryptor, message, encrypt)
 }
 
-// 存储用户节点来源
+// doStoreSource stores the node source of the user.
 func (l *NodeLinker) doStoreSource(uid int64, name, nid string) {
-	wait, done := func() (bool, bool) {
-		l.rw.Lock()
-		defer l.rw.Unlock()
+	sh := l.shard(uid)
 
-		if sources, ok := l.sources[uid]; ok {
+	wait, done := func() (bool, bool) {
+		sh.rw.Lock()
+		defer sh.rw.Unlock()
+
+		if sources, ok := sh.sources[uid]; ok {
 			if oldNID, ok := sources[name]; ok {
 				if oldNID == nid {
 					return false, false
@@ -406,7 +416,7 @@ func (l *NodeLinker) doStoreSource(uid int64, name, nid string) {
 				return l.opts.ID == nid, false
 			}
 		} else {
-			l.sources[uid] = map[string]string{name: nid}
+			sh.sources[uid] = map[string]string{name: nid}
 
 			return l.opts.ID == nid, false
 		}
@@ -421,13 +431,15 @@ func (l *NodeLinker) doStoreSource(uid int64, name, nid string) {
 	}
 }
 
-// 删除用户节点来源
+// doDeleteSource removes the node source of the user.
 func (l *NodeLinker) doDeleteSource(uid int64, name, nid string) {
-	done := func() bool {
-		l.rw.Lock()
-		defer l.rw.Unlock()
+	sh := l.shard(uid)
 
-		sources, ok := l.sources[uid]
+	done := func() bool {
+		sh.rw.Lock()
+		defer sh.rw.Unlock()
+
+		sources, ok := sh.sources[uid]
 		if !ok {
 			return false
 		}
@@ -443,7 +455,7 @@ func (l *NodeLinker) doDeleteSource(uid int64, name, nid string) {
 		}
 
 		if len(sources) == 1 {
-			delete(l.sources, uid)
+			delete(sh.sources, uid)
 		} else {
 			delete(sources, name)
 		}
@@ -456,21 +468,28 @@ func (l *NodeLinker) doDeleteSource(uid int64, name, nid string) {
 	}
 }
 
-// 加载用户节点来源
+// doLoadSource loads the node source of the user.
+//
+// It is called for every stateful message delivery. It takes the read lock on the shard selected
+// by UID, avoiding the cache-line contention a global lock would cause under high-concurrency
+// delivery.
 func (l *NodeLinker) doLoadSource(uid int64, name string) (string, bool) {
-	l.rw.RLock()
-	defer l.rw.RUnlock()
+	sh := l.shard(uid)
 
-	if sources, ok := l.sources[uid]; ok {
+	sh.rw.RLock()
+	sources, ok := sh.sources[uid]
+	if ok {
 		if nid, ok := sources[name]; ok {
-			return nid, ok
+			sh.rw.RUnlock()
+			return nid, true
 		}
 	}
+	sh.rw.RUnlock()
 
 	return "", false
 }
 
-// WatchUserLocate 监听用户定位
+// WatchUserLocate watches user locate events and keeps the local source cache in sync.
 func (l *NodeLinker) WatchUserLocate() {
 	if l.opts.Locator == nil {
 		return
@@ -492,7 +511,7 @@ func (l *NodeLinker) WatchUserLocate() {
 			default:
 				events, err := watcher.Next()
 				if err != nil {
-					if errors.Is(err, context.Canceled) {
+					if errors.Is(err, errors.ErrWatcherStopped) {
 						return
 					} else {
 						continue
@@ -514,7 +533,7 @@ func (l *NodeLinker) WatchUserLocate() {
 	}()
 }
 
-// WatchClusterInstance 监听集群实例
+// WatchClusterInstance watches cluster instance changes and refreshes the dispatcher.
 func (l *NodeLinker) WatchClusterInstance() {
 	ctx, cancel := context.WithTimeout(l.ctx, 3*time.Second)
 	watcher, err := l.opts.Registry.Watch(ctx, cluster.Node.String())
@@ -532,7 +551,7 @@ func (l *NodeLinker) WatchClusterInstance() {
 			default:
 				services, err := watcher.Next()
 				if err != nil {
-					if errors.Is(err, context.Canceled) {
+					if errors.Is(err, context.Canceled) || errors.Is(err, errors.ErrWatcherStopped) {
 						return
 					} else {
 						continue

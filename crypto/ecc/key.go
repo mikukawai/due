@@ -1,10 +1,3 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/11/1 12:50 上午
- * @Desc: TODO
- */
-
 package ecc
 
 import (
@@ -17,17 +10,17 @@ import (
 	"os"
 	"path"
 
+	"github.com/dobyte/due/crypto/ecc/v2/ecies"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/utils/xconv"
 	"github.com/dobyte/due/v2/utils/xos"
-	"github.com/ethereum/go-ethereum/crypto/ecies"
 )
 
 type Key struct {
 	prv *ecdsa.PrivateKey
 }
 
-// GenerateKey 生成秘钥
+// GenerateKey generates a key pair on the given curve.
 func GenerateKey(curve Curve) (*Key, error) {
 	prv, err := ecdsa.GenerateKey(curve.New(), rand.Reader)
 	if err != nil {
@@ -37,17 +30,17 @@ func GenerateKey(curve Curve) (*Key, error) {
 	return &Key{prv: prv}, nil
 }
 
-// PublicKey 获取公钥
+// PublicKey returns the public key.
 func (k *Key) PublicKey() *ecdsa.PublicKey {
 	return &k.prv.PublicKey
 }
 
-// PrivateKey 获取私钥
+// PrivateKey returns the private key.
 func (k *Key) PrivateKey() *ecdsa.PrivateKey {
 	return k.prv
 }
 
-// MarshalPublicKey 编码公钥
+// MarshalPublicKey encodes the public key in PEM format.
 func (k *Key) MarshalPublicKey() ([]byte, error) {
 	buf := bytes.NewBuffer(nil)
 
@@ -59,7 +52,7 @@ func (k *Key) MarshalPublicKey() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// 编码私钥
+// marshalPublicKey writes the public key to out in PEM format.
 func (k *Key) marshalPublicKey(out io.Writer) error {
 	derText, err := x509.MarshalPKIXPublicKey(k.PublicKey())
 	if err != nil {
@@ -72,7 +65,7 @@ func (k *Key) marshalPublicKey(out io.Writer) error {
 	})
 }
 
-// MarshalPrivateKey 编码私钥
+// MarshalPrivateKey encodes the private key in PEM format.
 func (k *Key) MarshalPrivateKey() ([]byte, error) {
 	buf := bytes.NewBuffer(nil)
 
@@ -84,7 +77,7 @@ func (k *Key) MarshalPrivateKey() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// 编码私钥
+// marshalPrivateKey writes the private key to out in PEM format.
 func (k *Key) marshalPrivateKey(out io.Writer) error {
 	derText, err := x509.MarshalECPrivateKey(k.PrivateKey())
 	if err != nil {
@@ -97,24 +90,28 @@ func (k *Key) marshalPrivateKey(out io.Writer) error {
 	})
 }
 
-// SaveKeyPair 保存秘钥对
+// SaveKeyPair saves the key pair under dir with the given file name.
 func (k *Key) SaveKeyPair(dir string, file string) (err error) {
 	if !xos.IsDir(dir) {
-		err = os.MkdirAll(dir, os.ModePerm)
+		err = os.MkdirAll(dir, 0o700)
 		if err != nil {
 			return
 		}
 	}
 
-	err = k.savePublicKey(dir, file)
-	if err != nil {
+	if err = k.savePublicKey(dir, file); err != nil {
 		return
 	}
 
-	return k.savePrivateKey(dir, file)
+	if err = k.savePrivateKey(dir, file); err != nil {
+		_ = os.Remove(publicKeyFilePath(dir, file))
+		return
+	}
+
+	return nil
 }
 
-// 保存公钥
+// savePrivateKey writes the private key to its file, removing the file on failure.
 func (k *Key) savePrivateKey(dir string, file string) (err error) {
 	filepath := path.Join(dir, file)
 	defer func() {
@@ -123,24 +120,22 @@ func (k *Key) savePrivateKey(dir string, file string) (err error) {
 		}
 	}()
 
-	f, err := os.Create(filepath)
+	f, err := os.OpenFile(filepath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	if err = f.Chmod(0o600); err != nil {
 		return
 	}
 
 	return k.marshalPrivateKey(f)
 }
 
-// 保存公钥
+// savePublicKey writes the public key to its file, removing the file on failure.
 func (k *Key) savePublicKey(dir string, file string) (err error) {
-	base, _, name, ext := xos.Split(file)
-	if ext != "" {
-		file = name + ".pub." + ext
-	} else {
-		file = name + ".pub"
-	}
-
-	filepath := path.Join(dir, base, file)
+	filepath := publicKeyFilePath(dir, file)
 	defer func() {
 		if err != nil {
 			_ = os.Remove(filepath)
@@ -151,8 +146,22 @@ func (k *Key) savePublicKey(dir string, file string) (err error) {
 	if err != nil {
 		return
 	}
+	defer f.Close()
 
 	return k.marshalPublicKey(f)
+}
+
+// publicKeyFilePath returns the file path of the public key for the given directory and file name.
+// The public key file name is derived from file by inserting a ".pub" suffix before its extension.
+func publicKeyFilePath(dir string, file string) string {
+	base, _, name, ext := xos.Split(file)
+	if ext != "" {
+		file = name + ".pub." + ext
+	} else {
+		file = name + ".pub"
+	}
+
+	return path.Join(dir, base, file)
 }
 
 func loadKey(key string) (*pem.Block, error) {
@@ -194,16 +203,16 @@ func parseECIESPrivateKey(privateKey string) (*ecies.PrivateKey, error) {
 }
 
 func parseECDSAPublicKey(publicKey string) (*ecdsa.PublicKey, error) {
-	black, err := loadKey(publicKey)
+	block, err := loadKey(publicKey)
 	if err != nil {
 		return nil, err
 	}
 
-	if black == nil {
+	if block == nil {
 		return nil, errors.ErrInvalidPublicKey
 	}
 
-	pub, err := x509.ParsePKIXPublicKey(black.Bytes)
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -217,14 +226,14 @@ func parseECDSAPublicKey(publicKey string) (*ecdsa.PublicKey, error) {
 }
 
 func parseECDSAPrivateKey(privateKey string) (*ecdsa.PrivateKey, error) {
-	black, err := loadKey(privateKey)
+	block, err := loadKey(privateKey)
 	if err != nil {
 		return nil, err
 	}
 
-	if black == nil {
+	if block == nil {
 		return nil, errors.ErrInvalidPrivateKey
 	}
 
-	return x509.ParseECPrivateKey(black.Bytes)
+	return x509.ParseECPrivateKey(block.Bytes)
 }

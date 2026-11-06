@@ -7,11 +7,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/dobyte/due/v2/utils/xreflect"
 )
 
+var durationRegexp = regexp.MustCompile(`(((-?\d+)(\.\d+)?)(d))`)
+
+// Duration converts val to a time.Duration.
+//
+// Numeric values are converted directly as nanoseconds; strings accept time units such as "ns",
+// "us" (or "µs"), "ms", "s", "m", "h" and "d" (day), where "d" is replaced by the corresponding
+// number of nanoseconds before parsing.
 func Duration(val any) time.Duration {
 	if val == nil {
 		return 0
@@ -19,8 +25,7 @@ func Duration(val any) time.Duration {
 
 	// Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h", "d".
 	toDuration := func(s string) time.Duration {
-		reg := regexp.MustCompile(`(((-?\d+)(\.\d+)?)(d))`)
-		d, _ := time.ParseDuration(reg.ReplaceAllStringFunc(strings.ToLower(s), func(ss string) string {
+		d, _ := time.ParseDuration(durationRegexp.ReplaceAllStringFunc(strings.ToLower(s), func(ss string) string {
 			v, err := strconv.ParseFloat(strings.TrimSuffix(ss, "d"), 64)
 			if err != nil {
 				return ""
@@ -34,78 +39,135 @@ func Duration(val any) time.Duration {
 	case int:
 		return time.Duration(v)
 	case *int:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case int8:
 		return time.Duration(v)
 	case *int8:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case int16:
 		return time.Duration(v)
 	case *int16:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case int32:
 		return time.Duration(v)
 	case *int32:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case int64:
 		return time.Duration(v)
 	case *int64:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case uint:
 		return time.Duration(v)
 	case *uint:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case uint8:
 		return time.Duration(v)
 	case *uint8:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case uint16:
 		return time.Duration(v)
 	case *uint16:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case uint32:
 		return time.Duration(v)
 	case *uint32:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case uint64:
 		return time.Duration(v)
 	case *uint64:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case float32:
 		return time.Duration(v)
 	case *float32:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case float64:
 		return time.Duration(v)
 	case *float64:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(*v)
 	case complex64:
 		return time.Duration(real(v))
 	case *complex64:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(real(*v))
 	case complex128:
 		return time.Duration(real(v))
 	case *complex128:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(real(*v))
 	case bool:
 		return 0
 	case *bool:
+		if v == nil {
+			return 0
+		}
 		return 0
 	case string:
 		return toDuration(v)
 	case *string:
+		if v == nil {
+			return 0
+		}
 		return toDuration(*v)
 	case []byte:
-		return toDuration(*(*string)(unsafe.Pointer(&v)))
+		return toDuration(BytesToString(v))
 	case *[]byte:
-		return toDuration(*(*string)(unsafe.Pointer(v)))
+		if v == nil {
+			return 0
+		}
+		return toDuration(BytesToString(*v))
 	case time.Time:
 		return time.Duration(v.UnixNano())
 	case *time.Time:
+		if v == nil {
+			return 0
+		}
 		return time.Duration(v.UnixNano())
 	case time.Duration:
 		return v
 	case *time.Duration:
+		if v == nil {
+			return 0
+		}
 		return *v
 	default:
 		switch rk, rv := xreflect.Value(val); rk {
@@ -131,6 +193,7 @@ func Duration(val any) time.Duration {
 	}
 }
 
+// Durations converts val to a time.Duration slice.
 func Durations(val any) (slice []time.Duration) {
 	if val == nil {
 		return
@@ -143,6 +206,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]int:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -153,6 +219,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]int8:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -163,6 +232,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]int16:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -173,6 +245,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]int32:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -183,6 +258,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]int64:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -193,6 +271,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]uint:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -203,6 +284,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]uint8:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -213,6 +297,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]uint16:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -223,6 +310,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]uint32:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -233,6 +323,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]uint64:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -243,6 +336,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]float32:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -253,6 +349,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]float64:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -263,6 +362,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]complex64:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -273,6 +375,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]complex128:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -283,6 +388,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]string:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -293,6 +401,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]bool:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -303,6 +414,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[]any:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -313,6 +427,9 @@ func Durations(val any) (slice []time.Duration) {
 			slice[i] = Duration(v[i])
 		}
 	case *[][]byte:
+		if v == nil {
+			return
+		}
 		slice = make([]time.Duration, len(*v))
 		for i := range *v {
 			slice[i] = Duration((*v)[i])
@@ -331,11 +448,13 @@ func Durations(val any) (slice []time.Duration) {
 	return
 }
 
+// DurationPointer converts val to a pointer to time.Duration.
 func DurationPointer(any any) *time.Duration {
 	v := Duration(any)
 	return &v
 }
 
+// DurationsPointer converts val to a pointer to a time.Duration slice.
 func DurationsPointer(any any) *[]time.Duration {
 	v := Durations(any)
 	return &v

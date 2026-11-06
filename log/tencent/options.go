@@ -11,13 +11,14 @@ const (
 	tencentTopicIDKey         = "etc.log.tencent.topicID"
 )
 
+// Option configures the syncer.
 type Option func(o *options)
 
 type options struct {
-	topicID         string // 腾讯云CLS主题ID
-	endpoint        string // 腾讯云CLS服务域名，公网使用公网域名，内网使用私网域名
-	accessKeyID     string // 腾讯云CLS访问密钥ID
-	accessKeySecret string // 腾讯云CLS访问密钥密码
+	topicID         string // Tencent Cloud CLS topic ID
+	endpoint        string // Tencent Cloud CLS service endpoint; use the public domain over the internet and the private domain within a VPC
+	accessKeyID     string // Tencent Cloud CLS access key ID
+	accessKeySecret string // Tencent Cloud CLS access key secret
 }
 
 func defaultOptions() *options {
@@ -29,22 +30,22 @@ func defaultOptions() *options {
 	}
 }
 
-// WithTopicID 设置主题ID
+// WithTopicID sets the Tencent Cloud CLS topic ID.
 func WithTopicID(topicID string) Option {
 	return func(o *options) { o.topicID = topicID }
 }
 
-// WithEndpoint 设置端口
+// WithEndpoint sets the Tencent Cloud CLS service endpoint.
 func WithEndpoint(endpoint string) Option {
 	return func(o *options) { o.endpoint = endpoint }
 }
 
-// WithAccessKeyID 设置访问密钥ID
+// WithAccessKeyID sets the Tencent Cloud CLS access key ID.
 func WithAccessKeyID(accessKeyID string) Option {
 	return func(o *options) { o.accessKeyID = accessKeyID }
 }
 
-// WithAccessKeySecret 设置访问密钥密码
+// WithAccessKeySecret sets the Tencent Cloud CLS access key secret.
 func WithAccessKeySecret(accessKeySecret string) Option {
 	return func(o *options) { o.accessKeySecret = accessKeySecret }
 }

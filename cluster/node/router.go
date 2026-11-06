@@ -2,121 +2,132 @@ package node
 
 import (
 	"context"
+	"sync"
 
-	"github.com/dobyte/due/v2/cluster"
+	"github.com/dobyte/due/v2/core/queue"
 	"github.com/dobyte/due/v2/log"
-	"github.com/dobyte/due/v2/utils/xcall"
 )
 
+// RouteHandler is a route handler function.
 type RouteHandler func(ctx Context)
 
-// RouteOptions 路由选项
+// RouteOptions are route options.
 type RouteOptions struct {
-	// 是否内部的路由，默认非内部
-	// 外部路由可在客户端、网关、节点间进行消息流转
-	// 内部路由仅限于在节点间进行消息流转
+	// Internal reports whether the route is internal, and it is not internal by default.
+	//
+	// External routes can carry messages across clients, gateways and nodes, while internal routes
+	// can only carry messages between nodes.
 	Internal bool
 
-	// 是否有状态路由，默认无状态
-	// 无状态路由消息会根据负载均衡策略分配到不同的节点服务器进行处理
-	// 有状态路由消息会在绑定节点服务器后，固定路由到绑定的节点服务器进行处理
+	// Stateful reports whether the route is stateful, and it is not stateful by default.
+	//
+	// Messages of a stateless route are dispatched to different node servers by the load balancing
+	// strategy, while messages of a stateful route are always routed to the node server the user is
+	// bound to.
 	Stateful bool
 
-	// 是否授权路由，默认非授权
-	// 授权路由在集群间流转时必需附带UID信息，否则无法进行路由投递
-	// 该参数可在网关层对未授权连接进行提前拦截，降低节点服对于攻击处理的压力
+	// Authorized reports whether the route is authorized, and it is not authorized by default.
+	//
+	// An authorized route must carry the UID when it flows across the cluster, otherwise it cannot
+	// be delivered. The gateway can use this option to intercept unauthorized connections early and
+	// reduce the attack handling pressure on node servers.
 	Authorized bool
 
-	// 路由中间件
+	// Middlewares are the route middlewares.
 	Middlewares []MiddlewareHandler
 }
 
 var (
-	InternalRoute   = RouteOptions{Internal: true}
-	StatefulRoute   = RouteOptions{Stateful: true}
-	AuthorizedRoute = RouteOptions{Authorized: true}
+	InternalRoute   = RouteOptions{Internal: true}   // Internal route, messages flow between nodes only
+	StatefulRoute   = RouteOptions{Stateful: true}   // Stateful route, always routed to the bound node
+	AuthorizedRoute = RouteOptions{Authorized: true} // Authorized route, must carry the UID when flowing
 )
 
+// Router is a router.
+//
+// It carries the routing queue of a node and is responsible for receiving and handling routed
+// messages.
 type Router struct {
 	node                *Node
+	mwPool              sync.Pool
+	queue               *queue.Queue[*request]
 	routes              map[int32]*routeEntity
-	reqChan             chan *request
 	preRouteHandler     RouteHandler
 	postRouteHandler    RouteHandler
 	defaultRouteHandler RouteHandler
 }
 
+// routeEntity is a route entity.
 type routeEntity struct {
-	route   int32        // 路由
-	handler RouteHandler // 路由处理器
-	options RouteOptions // 路由选项
+	route   int32        // Route number
+	handler RouteHandler // Route handler
+	options RouteOptions // Route options
 }
 
+// newRouter creates a new router for the given node server.
 func newRouter(node *Node) *Router {
 	return &Router{
-		node:    node,
-		routes:  make(map[int32]*routeEntity),
-		reqChan: make(chan *request, 10240),
+		node:   node,
+		queue:  queue.NewQueue[*request](node.opts.messageQueueSize, node.opts.messageWriteTimeout, &sync.RWMutex{}),
+		routes: make(map[int32]*routeEntity),
+		mwPool: sync.Pool{New: func() any { return &Middleware{} }},
 	}
 }
 
-// AddRouteHandler 添加路由处理器
+// AddRouteHandler adds a route handler.
 func (r *Router) AddRouteHandler(route int32, handler RouteHandler, opts ...RouteOptions) {
-	if r.node.getState() != cluster.Shut {
-		log.Warnf("the node server is working, can't add route handler")
-		return
-	}
-
-	if len(opts) > 0 {
-		r.routes[route] = &routeEntity{
-			route:   route,
-			handler: handler,
-			options: opts[0],
+	if r.node.isShut() {
+		if len(opts) > 0 {
+			r.routes[route] = &routeEntity{
+				route:   route,
+				handler: handler,
+				options: opts[0],
+			}
+		} else {
+			r.routes[route] = &routeEntity{
+				route:   route,
+				handler: handler,
+			}
 		}
 	} else {
-		r.routes[route] = &routeEntity{
-			route:   route,
-			handler: handler,
-		}
+		log.Warnf("the node server is not shut, can't add route handler")
 	}
 }
 
-// SetDefaultRouteHandler 设置默认路由处理器，所有未注册的路由均走默认路由处理器
+// SetDefaultRouteHandler sets the default route handler. Every unregistered route goes through the
+// default route handler.
 func (r *Router) SetDefaultRouteHandler(handler RouteHandler) {
-	if r.node.getState() != cluster.Shut {
-		log.Warnf("the node server is working, can't set default route handler")
-		return
+	if r.node.isShut() {
+		r.defaultRouteHandler = handler
+	} else {
+		log.Warnf("the node server is not shut, can't set default route handler")
 	}
-
-	r.defaultRouteHandler = handler
 }
 
-// HasDefaultRouteHandler 是否存在默认路由处理器
+// HasDefaultRouteHandler reports whether a default route handler exists.
 func (r *Router) HasDefaultRouteHandler() bool {
 	return r.defaultRouteHandler != nil
 }
 
-// SetPreRouteHandler 设置前置路由处理器
+// SetPreRouteHandler sets the pre-route handler.
 func (r *Router) SetPreRouteHandler(handler RouteHandler) {
-	if r.node.getState() != cluster.Shut {
-		log.Warnf("the node server is working, can't set pre-route handler")
-		return
+	if r.node.isShut() {
+		r.preRouteHandler = handler
+	} else {
+		log.Warnf("the node server is not shut, can't set pre-route handler")
 	}
-
-	r.preRouteHandler = handler
 }
 
-// SetPostRouteHandler 设置后置路由处理器
+// SetPostRouteHandler sets the post-route handler.
 func (r *Router) SetPostRouteHandler(handler RouteHandler) {
-	if r.node.getState() != cluster.Shut {
-		log.Warnf("the node server is working, can't set post-route handler")
-		return
+	if r.node.isShut() {
+		r.postRouteHandler = handler
+	} else {
+		log.Warnf("the node server is not shut, can't set post-route handler")
 	}
-
-	r.postRouteHandler = handler
 }
 
-// CheckRouteStateful 是否为有状态路由
+// CheckRouteStateful reports whether the route is stateful and whether the route exists.
 func (r *Router) CheckRouteStateful(route int32) (stateful bool, exist bool) {
 	if entity, ok := r.routes[route]; ok {
 		exist, stateful = ok, entity.options.Stateful
@@ -124,7 +135,7 @@ func (r *Router) CheckRouteStateful(route int32) (stateful bool, exist bool) {
 	return
 }
 
-// Group 路由组
+// Group groups routes into a RouterGroup configured by the given functions.
 func (r *Router) Group(groups ...func(group *RouterGroup)) *RouterGroup {
 	group := &RouterGroup{
 		router:      r,
@@ -138,52 +149,87 @@ func (r *Router) Group(groups ...func(group *RouterGroup)) *RouterGroup {
 	return group
 }
 
-func (r *Router) deliver(gid, nid, pid string, cid, uid int64, seq, route int32, data any) {
+// deliver routes a message. It fetches a request object from the pool, fills in the message content
+// and writes it to the routing queue for asynchronous handling. It returns the error reported when
+// the message fails to be enqueued.
+func (r *Router) deliver(gid, nid, pid string, cid, uid int64, seq, route int32, message any) error {
 	req := r.node.reqPool.Get().(*request)
-	req.ctx = context.Background()
 	req.gid = gid
 	req.nid = nid
 	req.pid = pid
 	req.cid = cid
 	req.uid = uid
-	req.message.Seq = seq
-	req.message.Route = route
-	req.message.Data = data
-	r.reqChan <- req
+	req.seq = seq
+	req.route = route
+	req.message = message
+
+	if r.node.opts.ctxFunc != nil {
+		req.ctx = r.node.opts.ctxFunc()
+	} else {
+		req.ctx = context.Background()
+	}
+
+	if err := r.queue.Write(req); err != nil {
+		req.release()
+		return err
+	}
+
+	return nil
 }
 
+// receive returns the channel from which routed messages are received.
 func (r *Router) receive() <-chan *request {
-	return r.reqChan
+	return r.queue.Read()
 }
 
+// close closes the router.
 func (r *Router) close() {
-	close(r.reqChan)
+	r.queue.Close()
 }
 
+// clean releases every request object still in the routing queue.
+func (r *Router) clean() {
+	r.queue.Clean(func(req *request) { req.release() })
+}
+
+// handle handles a routed message. It looks up the matching route handler, runs the pre-route and
+// post-route handlers and the middleware chain, then recycles the request object once handling is
+// done.
 func (r *Router) handle(req *request) {
+	if req == nil {
+		r.queue.Done(true)
+		return
+	}
+
 	version := req.incrVersion()
 
-	route, ok := r.routes[req.message.Route]
+	route, ok := r.routes[req.route]
 	if !ok && r.defaultRouteHandler == nil {
 		req.compareVersionRecycle(version)
-		log.Warnf("message routing does not register handler function, route: %v", req.message.Route)
+		log.Warnf("message routing does not register handler function, route: %v", req.route)
 		return
 	}
 
 	if r.preRouteHandler != nil {
-		xcall.Call(func() { r.preRouteHandler(req) })
+		safeCallContextHandler(r.preRouteHandler, req)
 	}
 
 	if ok {
 		if len(route.options.Middlewares) > 0 {
-			middleware := &Middleware{index: -1, middlewares: route.options.Middlewares, routeHandler: route.handler}
+			middleware := r.mwPool.Get().(*Middleware)
+			middleware.index = -1
+			middleware.middlewares = route.options.Middlewares
+			middleware.routeHandler = route.handler
+
 			middleware.Next(req)
+
+			r.mwPool.Put(middleware)
 			return
 		} else {
-			xcall.Call(func() { route.handler(req) })
+			safeCallContextHandler(route.handler, req)
 		}
 	} else {
-		xcall.Call(func() { r.defaultRouteHandler(req) })
+		safeCallContextHandler(r.defaultRouteHandler, req)
 	}
 
 	req.compareVersionExecDefer(version)
@@ -191,19 +237,23 @@ func (r *Router) handle(req *request) {
 	req.compareVersionRecycle(version)
 }
 
+// RouterGroup is a route group.
+//
+// It manages a set of routes and their middlewares together.
 type RouterGroup struct {
 	router      *Router
 	middlewares []MiddlewareHandler
 }
 
-// Middleware 添加中间件
+// Middleware adds middlewares to the route group.
 func (g *RouterGroup) Middleware(middlewares ...MiddlewareHandler) *RouterGroup {
 	g.middlewares = append(g.middlewares, middlewares...)
 
 	return g
 }
 
-// AddRouteHandler 添加路由处理器
+// AddRouteHandler adds a route handler. It merges the route group middlewares with the middlewares
+// of the route itself.
 func (g *RouterGroup) AddRouteHandler(route int32, handler RouteHandler, opts ...RouteOptions) *RouterGroup {
 	var options RouteOptions
 

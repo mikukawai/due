@@ -1,15 +1,4 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/5/14 10:42 上午
- * @Desc: TODO
- */
-
 package json
-
-import (
-	"github.com/bytedance/sonic"
-)
 
 const Name = "json"
 
@@ -17,27 +6,32 @@ var DefaultCodec = &codec{}
 
 type codec struct{}
 
-// Name 编解码器名称
+// Name returns the codec name.
 func (codec) Name() string {
 	return Name
 }
 
-// Marshal 编码
+// Marshal encodes v.
 func (codec) Marshal(v any) ([]byte, error) {
-	return sonic.Marshal(v)
+	return marshal(v)
 }
 
-// Unmarshal 解码
+// Append appends the JSON encoding of v to dst.
+func (codec) Append(dst []byte, v any) ([]byte, error) {
+	return appendEncode(dst, v)
+}
+
+// Unmarshal decodes data into v.
 func (codec) Unmarshal(data []byte, v any) error {
-	return sonic.Unmarshal(data, v)
+	return unmarshal(data, v)
 }
 
-// Marshal 编码
+// Marshal encodes v using the default codec.
 func Marshal(v any) ([]byte, error) {
 	return DefaultCodec.Marshal(v)
 }
 
-// Unmarshal 解码
+// Unmarshal decodes data into v using the default codec.
 func Unmarshal(data []byte, v any) error {
 	return DefaultCodec.Unmarshal(data, v)
 }

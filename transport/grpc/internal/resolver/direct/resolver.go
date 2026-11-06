@@ -7,20 +7,26 @@ import (
 	"google.golang.org/grpc/resolver"
 )
 
+// Resolver is the direct connection mode resolver.
 type Resolver struct {
 	builder *Builder
 	target  resolver.Target
 	cc      resolver.ClientConn
 }
 
+// ResolveNow re-resolves; the direct connection mode ignores this callback.
 func (r *Resolver) ResolveNow(_ resolver.ResolveNowOptions) {
 	// ignore
 }
 
+// Close closes the resolver.
+//
+// It removes itself from the builder and releases the reference.
 func (r *Resolver) Close() {
-	log.Warnf("direct resolver close")
+	r.builder.resolvers.Delete(r.target.URL.Host)
 }
 
+// updateState pushes the resolver state to the client connection.
 func (r *Resolver) updateState(state resolver.State) {
 	if err := r.cc.UpdateState(state); err != nil {
 		r.cc.ReportError(err)

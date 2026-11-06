@@ -2,6 +2,7 @@ package net
 
 import (
 	"net"
+	"net/url"
 	"strconv"
 
 	"github.com/dobyte/due/v2/errors"
@@ -12,8 +13,10 @@ const (
 	IPv4Loopback = "127.0.0.1"
 )
 
-// ParseAddr 解析地址
-// 注：仅在addr为0.0.0.0:[port]或:[port]时才会根据wan参数自动获取暴露IP
+// ParseAddr parses addr into a listen address and an expose address.
+//
+// The expose IP is only resolved automatically from the expose argument when addr is
+// 0.0.0.0:[port] or :[port].
 func ParseAddr(addr string, expose ...bool) (string, string, error) {
 	var (
 		err        error
@@ -61,13 +64,13 @@ func ParseAddr(addr string, expose ...bool) (string, string, error) {
 	return net.JoinHostPort(listenHost, port), net.JoinHostPort(exposeHost, port), nil
 }
 
-// ExtractIP 提取主机地址
+// ExtractIP extracts the host from addr.
 func ExtractIP(addr net.Addr) (ip string, err error) {
 	ip, _, err = net.SplitHostPort(addr.String())
 	return
 }
 
-// ExtractPort 提取主机端口
+// ExtractPort extracts the port from addr.
 func ExtractPort(addr net.Addr) (int, error) {
 	_, port, err := net.SplitHostPort(addr.String())
 	if err != nil {
@@ -76,21 +79,21 @@ func ExtractPort(addr net.Addr) (int, error) {
 	return strconv.Atoi(port)
 }
 
-// ExternalIP 获取外网IP地址
+// ExternalIP returns the external IP address.
 //
 // Deprecated: As of due v2.3.0, this function simply calls [net.PublicIP].
 func ExternalIP() (string, error) {
 	return PublicIP()
 }
 
-// InternalIP 获取内网IP地址
+// InternalIP returns the internal IP address.
 //
 // Deprecated: As of due v2.3.0, this function simply calls [net.PublicIP].
 func InternalIP() (string, error) {
 	return PrivateIP()
 }
 
-// PublicIP 获取公网IP
+// PublicIP returns the public IP address.
 func PublicIP() (string, error) {
 	if globalPublicIPResolver != nil {
 		return globalPublicIPResolver()
@@ -99,7 +102,7 @@ func PublicIP() (string, error) {
 	}
 }
 
-// PrivateIP 获取私网IP
+// PrivateIP returns the private IP address.
 func PrivateIP() (string, error) {
 	if globalPrivateIPResolver != nil {
 		return globalPrivateIPResolver()
@@ -108,7 +111,7 @@ func PrivateIP() (string, error) {
 	}
 }
 
-// AssignRandPort 分配一个随机端口
+// AssignRandPort assigns a random port, optionally bound to ip.
 func AssignRandPort(ip ...string) (int, error) {
 	addr := ":0"
 	if len(ip) > 0 {
@@ -127,7 +130,7 @@ func AssignRandPort(ip ...string) (int, error) {
 	return port, nil
 }
 
-// FulfillAddr 补全地址
+// FulfillAddr completes addr with the default host when it is missing.
 func FulfillAddr(addr string) string {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -138,4 +141,24 @@ func FulfillAddr(addr string) string {
 	}
 
 	return net.JoinHostPort(host, port)
+}
+
+// ParseHostPort parses an endpoint into a host and a port.
+func ParseHostPort(endpoint string) (string, uint64, error) {
+	raw, err := url.Parse(endpoint)
+	if err != nil {
+		return "", 0, err
+	}
+
+	host, p, err := net.SplitHostPort(raw.Host)
+	if err != nil {
+		return "", 0, err
+	}
+
+	port, err := strconv.ParseUint(p, 10, 64)
+	if err != nil {
+		return "", 0, err
+	}
+
+	return host, port, nil
 }

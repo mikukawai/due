@@ -1,13 +1,16 @@
 package consul
 
 import (
-	"context"
+	"time"
+
 	"github.com/dobyte/due/v2/etc"
 	"github.com/hashicorp/consul/api"
 )
 
 const (
 	defaultAddr                           = "127.0.0.1:8500"
+	defaultTimeout                        = "3s"
+	defaultRetryTimes                     = 3
 	defaultHealthCheck                    = true
 	defaultHealthCheckInterval            = 10
 	defaultHealthCheckTimeout             = 5
@@ -18,6 +21,8 @@ const (
 
 const (
 	defaultAddrKey                           = "etc.registry.consul.addr"
+	defaultTimeoutKey                        = "etc.registry.consul.timeout"
+	defaultRetryTimesKey                     = "etc.registry.consul.retryTimes"
 	defaultHealthCheckKey                    = "etc.registry.consul.healthCheck"
 	defaultHealthCheckIntervalKey            = "etc.registry.consul.healthCheckInterval"
 	defaultHealthCheckTimeoutKey             = "etc.registry.consul.healthCheckTimeout"
@@ -26,50 +31,57 @@ const (
 	defaultDeregisterCriticalServiceAfterKey = "etc.registry.consul.deregisterCriticalServiceAfter"
 )
 
+// Option configures the service registry and discovery component.
 type Option func(o *options)
 
 type options struct {
-	// 客户端连接地址
-	// 内建客户端配置，默认为127.0.0.1:8500
+	// Consul address.
+	// Defaults to 127.0.0.1:8500.
 	addr string
 
-	// 外部客户端
-	// 外部客户端配置，存在外部客户端时，优先使用外部客户端，默认为nil
+	// Consul client.
+	// Defaults to nil.
 	client *api.Client
 
-	// 上下文
-	// 默认为context.Background
-	ctx context.Context
+	// Timeout.
+	// Defaults to 3s.
+	timeout time.Duration
 
-	// 是否启用健康检查
-	// 默认为true
+	// Number of retries on errors.
+	// Defaults to 3.
+	retryTimes int
+
+	// Whether to enable health checks.
+	// Defaults to true.
 	enableHealthCheck bool
 
-	// 健康检查时间间隔（秒），仅在启用健康检查后生效
-	// 默认10秒
+	// Health check interval.
+	// Defaults to 10s.
 	healthCheckInterval int
 
-	// 健康检查超时时间（秒），仅在启用健康检查后生效
-	// 默认5秒
+	// Health check timeout.
+	// Defaults to 5s.
 	healthCheckTimeout int
 
-	// 是否启用心跳检查
-	// 默认为true
+	// Whether to enable heartbeat checks.
+	// Defaults to true.
 	enableHeartbeatCheck bool
 
-	// 心跳检查时间间隔（秒），仅在启用心跳检查后生效
-	// 默认10秒
+	// Heartbeat check interval.
+	// Defaults to 10s.
 	heartbeatCheckInterval int
 
-	// 健康检测失败后自动注销服务时间（秒）
-	// 默认30秒
+	// Number of seconds to wait after registering a service before automatically deregistering it.
+	// Defaults to 30s.
 	deregisterCriticalServiceAfter int
 }
 
+// defaultOptions returns the options with their default values.
 func defaultOptions() *options {
 	return &options{
-		ctx:                            context.Background(),
 		addr:                           etc.Get(defaultAddrKey, defaultAddr).String(),
+		timeout:                        etc.Get(defaultTimeoutKey, defaultTimeout).Duration(),
+		retryTimes:                     etc.Get(defaultRetryTimesKey, defaultRetryTimes).Int(),
 		enableHealthCheck:              etc.Get(defaultHealthCheckKey, defaultHealthCheck).Bool(),
 		healthCheckInterval:            etc.Get(defaultHealthCheckIntervalKey, defaultHealthCheckInterval).Int(),
 		healthCheckTimeout:             etc.Get(defaultHealthCheckTimeoutKey, defaultHealthCheckTimeout).Int(),
@@ -79,47 +91,53 @@ func defaultOptions() *options {
 	}
 }
 
-// WithAddr 设置客户端连接地址
+// WithAddr sets the Consul address.
 func WithAddr(addr string) Option {
 	return func(o *options) { o.addr = addr }
 }
 
-// WithClient 设置外部客户端
+// WithClient sets the Consul client.
 func WithClient(client *api.Client) Option {
 	return func(o *options) { o.client = client }
 }
 
-// WithContext 设置context
-func WithContext(ctx context.Context) Option {
-	return func(o *options) { o.ctx = ctx }
+// WithTimeout sets the client connection timeout.
+func WithTimeout(timeout time.Duration) Option {
+	return func(o *options) { o.timeout = timeout }
 }
 
-// WithEnableHealthCheck 设置是否启用健康检查
+// WithRetryTimes sets the number of retries on errors.
+func WithRetryTimes(retryTimes int) Option {
+	return func(o *options) { o.retryTimes = retryTimes }
+}
+
+// WithEnableHealthCheck sets whether to enable health checks.
 func WithEnableHealthCheck(enable bool) Option {
 	return func(o *options) { o.enableHealthCheck = enable }
 }
 
-// WithHealthCheckInterval 设置健康检查时间间隔
+// WithHealthCheckInterval sets the health check interval.
 func WithHealthCheckInterval(interval int) Option {
 	return func(o *options) { o.healthCheckInterval = interval }
 }
 
-// WithHealthCheckTimeout 设置健康检查超时时间
+// WithHealthCheckTimeout sets the health check timeout.
 func WithHealthCheckTimeout(timeout int) Option {
 	return func(o *options) { o.healthCheckTimeout = timeout }
 }
 
-// WithEnableHeartbeatCheck 设置是否启用心跳检查
+// WithEnableHeartbeatCheck sets whether to enable heartbeat checks.
 func WithEnableHeartbeatCheck(enable bool) Option {
 	return func(o *options) { o.enableHeartbeatCheck = enable }
 }
 
-// WithHeartbeatCheckInterval 设置心跳检查时间间隔
+// WithHeartbeatCheckInterval sets the heartbeat check interval.
 func WithHeartbeatCheckInterval(interval int) Option {
 	return func(o *options) { o.heartbeatCheckInterval = interval }
 }
 
-// WithDeregisterCriticalServiceAfter 设置健康检测失败后自动注销服务时间
+// WithDeregisterCriticalServiceAfter sets the number of seconds to wait after registering a service
+// before automatically deregistering it.
 func WithDeregisterCriticalServiceAfter(after int) Option {
 	return func(o *options) { o.deregisterCriticalServiceAfter = after }
 }

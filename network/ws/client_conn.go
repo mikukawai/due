@@ -1,132 +1,136 @@
 package ws
 
 import (
-	"context"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/dobyte/due/v2/core/buffer"
+	"github.com/dobyte/due/v2/core/queue"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/network"
 	"github.com/dobyte/due/v2/packet"
-	"github.com/dobyte/due/v2/utils/xcall"
+	taskpool "github.com/dobyte/due/v2/task"
 	"github.com/dobyte/due/v2/utils/xnet"
-	"github.com/dobyte/due/v2/utils/xtime"
 	"github.com/gorilla/websocket"
 )
 
 type clientConn struct {
-	rw                    sync.RWMutex    // 锁
-	id                    int64           // 连接ID
-	uid                   atomic.Int64    // 用户ID
-	attr                  *attr           // 连接属性
-	conn                  *websocket.Conn // TCP源连接
-	state                 atomic.Int32    // 连接状态
-	client                *client         // 客户端
-	taskPool              sync.Pool       // 任务对象池
-	lowPriorityTaskQueue  chan *task      // 低优先级队列
-	highPriorityTaskQueue chan *task      // 高优先级队列
-	lastHeartbeatTime     atomic.Int64    // 上次心跳时间
-	done                  chan struct{}   // 写入完成信号
-	close                 chan struct{}   // 关闭信号
+	rw                sync.RWMutex                // Lock
+	id                int64                       // Connection ID
+	uid               atomic.Int64                // User ID
+	attr              *attr                       // Connection attributes
+	conn              *websocket.Conn             // Underlying WebSocket connection
+	state             atomic.Int32                // Connection state
+	cli               *client                     // Client
+	wg1               sync.WaitGroup              // Read wait group
+	wg2               sync.WaitGroup              // Write wait group
+	queue             *queue.Queue[buffer.Buffer] // Message queue
+	lastHeartbeatTime atomic.Int64                // Time of the last received heartbeat
 }
 
 var _ network.Conn = &clientConn{}
 
-func newClientConn(id int64, conn *websocket.Conn, client *client) network.Conn {
-	c := &clientConn{
-		id:                    id,
-		attr:                  &attr{},
-		conn:                  conn,
-		client:                client,
-		taskPool:              sync.Pool{New: func() any { return &task{} }},
-		lowPriorityTaskQueue:  make(chan *task, client.opts.writeQueueSize),
-		highPriorityTaskQueue: make(chan *task, client.opts.writeQueueSize),
-		done:                  make(chan struct{}),
-		close:                 make(chan struct{}),
-	}
-
+// newClientConn returns a new client connection.
+func newClientConn(cli *client, conn *websocket.Conn) network.Conn {
+	c := &clientConn{}
+	c.id = cli.cid.Add(1)
+	c.cli = cli
+	c.attr = &attr{}
+	c.conn = conn
 	c.state.Store(int32(network.ConnOpened))
-	c.lastHeartbeatTime.Store(xtime.Now().UnixNano())
+	c.queue = queue.NewQueue[buffer.Buffer](int32(max(minWriteQueueSize, cli.opts.writeQueueSize)), cli.opts.writeTimeout)
+	c.lastHeartbeatTime.Store(time.Now().UnixNano())
+	c.wg1.Go(func() { c.read(conn) })
+	c.wg2.Go(func() { c.write(conn) })
 
-	xcall.Go(c.read)
-
-	xcall.Go(c.write)
-
-	if c.client.connectHandler != nil {
-		c.client.connectHandler(c)
+	if c.cli.connectHandler != nil {
+		c.cli.connectHandler(c)
 	}
 
 	return c
 }
 
-// ID 获取连接ID
+// ID returns the connection ID.
 func (c *clientConn) ID() int64 {
 	return c.id
 }
 
-// UID 获取用户ID
+// UID returns the user ID.
 func (c *clientConn) UID() int64 {
 	return c.uid.Load()
 }
 
-// Attr 获取属性接口
+// Attr returns the attribute interface of the connection.
 func (c *clientConn) Attr() network.Attr {
 	return c.attr
 }
 
-// Bind 绑定用户ID
-func (c *clientConn) Bind(uid int64) {
+// Bind binds the connection to the given user ID.
+func (c *clientConn) Bind(uid int64) error {
+	c.rw.RLock()
+
+	if c.isClosed() {
+		c.rw.RUnlock()
+		return errors.ErrConnectionClosed
+	}
+
 	c.uid.Store(uid)
+
+	c.rw.RUnlock()
+
+	return nil
 }
 
-// Unbind 解绑用户ID
-func (c *clientConn) Unbind() {
+// Unbind unbinds the user ID from the connection.
+func (c *clientConn) Unbind() error {
+	c.rw.RLock()
+
+	if c.isClosed() {
+		c.rw.RUnlock()
+		return errors.ErrConnectionClosed
+	}
+
 	c.uid.Store(0)
+
+	c.rw.RUnlock()
+
+	return nil
 }
 
-// Send 发送消息（异步）
-// 由于gorilla/websocket库不支持一个连接得并发读写，因而使用Send方法会导致使用写锁操作
-// 建议使用Push方法替代Send
-func (c *clientConn) Send(msg []byte) (err error) {
-	if err := c.checkState(); err != nil {
-		return err
+// Push sends a message with low priority.
+//
+// The caller controls when buf is released when the send fails.
+func (c *clientConn) Push(buf buffer.Buffer) error {
+	if buf.Len() == 0 {
+		return errors.ErrInvalidMessage
 	}
 
 	c.rw.RLock()
-	defer c.rw.RUnlock()
 
-	if c.conn == nil {
-		return errors.ErrConnectionClosed
-	}
-
-	return c.doWriteToQueue(c.highPriorityTaskQueue, dataPacket, msg)
-}
-
-// Push 发送消息（异步）
-func (c *clientConn) Push(msg []byte) (err error) {
 	if err := c.checkState(); err != nil {
+		c.rw.RUnlock()
 		return err
 	}
 
-	c.rw.RLock()
-	defer c.rw.RUnlock()
+	err := c.queue.Write(buf)
 
-	if c.conn == nil {
-		return errors.ErrConnectionClosed
-	}
+	c.rw.RUnlock()
 
-	return c.doWriteToQueue(c.lowPriorityTaskQueue, dataPacket, msg)
+	return err
 }
 
-// State 获取连接状态
+// State returns the connection state.
 func (c *clientConn) State() network.ConnState {
 	return network.ConnState(c.state.Load())
 }
 
-// Close 关闭连接（主动关闭）
+// Close closes the connection.
+//
+// It is an active close. When force is true the connection is closed forcibly.
 func (c *clientConn) Close(force ...bool) error {
 	if len(force) > 0 && force[0] {
 		return c.forceClose()
@@ -135,7 +139,7 @@ func (c *clientConn) Close(force ...bool) error {
 	}
 }
 
-// LocalIP 获取本地IP
+// LocalIP returns the local IP address.
 func (c *clientConn) LocalIP() (string, error) {
 	addr, err := c.LocalAddr()
 	if err != nil {
@@ -145,24 +149,22 @@ func (c *clientConn) LocalIP() (string, error) {
 	return xnet.ExtractIP(addr)
 }
 
-// LocalAddr 获取本地地址
+// LocalAddr returns the local address.
 func (c *clientConn) LocalAddr() (net.Addr, error) {
-	if err := c.checkState(); err != nil {
-		return nil, err
-	}
-
 	c.rw.RLock()
-	conn := c.conn
-	c.rw.RUnlock()
 
-	if conn == nil {
+	if c.isClosed() {
+		c.rw.RUnlock()
 		return nil, errors.ErrConnectionClosed
 	}
+
+	conn := c.conn
+	c.rw.RUnlock()
 
 	return conn.LocalAddr(), nil
 }
 
-// RemoteIP 获取远端IP
+// RemoteIP returns the remote IP address.
 func (c *clientConn) RemoteIP() (string, error) {
 	addr, err := c.RemoteAddr()
 	if err != nil {
@@ -172,24 +174,23 @@ func (c *clientConn) RemoteIP() (string, error) {
 	return xnet.ExtractIP(addr)
 }
 
-// RemoteAddr 获取远端地址
+// RemoteAddr returns the remote address.
 func (c *clientConn) RemoteAddr() (net.Addr, error) {
-	if err := c.checkState(); err != nil {
-		return nil, err
-	}
-
 	c.rw.RLock()
-	conn := c.conn
-	c.rw.RUnlock()
 
-	if conn == nil {
+	if c.isClosed() {
+		c.rw.RUnlock()
 		return nil, errors.ErrConnectionClosed
 	}
+
+	conn := c.conn
+	c.rw.RUnlock()
 
 	return conn.RemoteAddr(), nil
 }
 
-// 检测连接状态
+// checkState checks the connection state. It returns the matching error for the hanged or closed
+// state, and nil when the connection is normal.
 func (c *clientConn) checkState() error {
 	switch c.State() {
 	case network.ConnHanged:
@@ -201,7 +202,12 @@ func (c *clientConn) checkState() error {
 	}
 }
 
-// 优雅关闭
+// graceClose closes the connection gracefully.
+//
+// It writes a close signal and waits for the write queue to drain before closing the connection, so
+// that buffered messages can be delivered as far as possible. When a graceful close timeout is
+// configured, the underlying connection is closed once the timeout elapses before the queue drains,
+// which forces the wait to end.
 func (c *clientConn) graceClose() error {
 	if !c.state.CompareAndSwap(int32(network.ConnOpened), int32(network.ConnHanged)) {
 		return errors.ErrConnectionNotOpened
@@ -212,141 +218,182 @@ func (c *clientConn) graceClose() error {
 		c.rw.RUnlock()
 		return errors.ErrConnectionClosed
 	}
-	c.lowPriorityTaskQueue <- &task{typ: closeSig}
+	conn := c.conn
+	q := c.queue
+	err := q.Write(buffer.NewBytes(nil))
 	c.rw.RUnlock()
 
-	<-c.done
-
-	if !c.state.CompareAndSwap(int32(network.ConnHanged), int32(network.ConnClosed)) {
-		return errors.ErrConnectionNotHanged
-	}
-
-	return c.doClose()
-}
-
-// 强制关闭
-func (c *clientConn) forceClose() error {
-	if !c.state.CompareAndSwap(int32(network.ConnOpened), int32(network.ConnClosed)) {
-		if !c.state.CompareAndSwap(int32(network.ConnHanged), int32(network.ConnClosed)) {
-			return errors.ErrConnectionClosed
+	if err == nil {
+		if closeTimeout := c.cli.opts.closeTimeout; closeTimeout > 0 {
+			// Close the underlying connection once the drain times out to interrupt a possibly blocking write in the write goroutine.
+			timer := time.AfterFunc(closeTimeout, func() { _ = conn.Close() })
+			q.Wait()
+			timer.Stop()
+		} else {
+			q.Wait()
 		}
 	}
 
+	if c.state.Swap(int32(network.ConnClosed)) == int32(network.ConnClosed) {
+		return errors.ErrConnectionClosed
+	}
+
 	return c.doClose()
 }
 
-// 执行关闭操作
-func (c *clientConn) doClose() error {
-	c.rw.Lock()
+// forceClose closes the connection forcibly.
+//
+// It immediately switches the state to closed and closes the connection without waiting for the
+// write queue to drain.
+func (c *clientConn) forceClose() error {
+	if c.state.Swap(int32(network.ConnClosed)) == int32(network.ConnClosed) {
+		return errors.ErrConnectionClosed
+	}
 
+	return c.doClose(true)
+}
+
+// doClose performs the close.
+//
+// It closes the write queue, waits for the read and write goroutines to exit, closes the WebSocket
+// connection and finally invokes the disconnect handler. When force is true it closes the WebSocket
+// connection first so that a possibly blocking write in the write goroutine is interrupted,
+// preserving the force-close semantics.
+func (c *clientConn) doClose(force ...bool) error {
+	c.rw.Lock()
 	if c.conn == nil {
 		c.rw.Unlock()
 		return errors.ErrConnectionClosed
 	}
 
-	close(c.lowPriorityTaskQueue)
-	close(c.highPriorityTaskQueue)
-	close(c.close)
-	close(c.done)
+	c.queue.Close()
 	conn := c.conn
 	c.conn = nil
 	c.rw.Unlock()
 
-	err := conn.Close()
+	var err error
 
-	if c.client.disconnectHandler != nil {
-		c.client.disconnectHandler(c)
+	if len(force) > 0 && force[0] {
+		err = conn.Close()
+		c.wg2.Wait()
+	} else {
+		c.wg2.Wait()
+		err = conn.Close()
+	}
+
+	c.wg1.Wait()
+
+	for buf := range c.queue.Read() {
+		buf.Release()
+	}
+
+	if c.cli.disconnectHandler != nil {
+		c.cli.disconnectHandler(c)
 	}
 
 	return err
 }
 
-// 读取消息
-func (c *clientConn) read() {
-	conn := c.conn
+// read reads messages.
+//
+// It keeps reading messages from the stream, updates the heartbeat time, detects empty and
+// heartbeat packets and dispatches them to the receive handler. A read failure triggers a force
+// close.
+func (c *clientConn) read(conn *websocket.Conn) {
+	var index int
 
 	for {
-		select {
-		case <-c.close:
-			return
-		default:
-			msgType, msgData, err := conn.ReadMessage()
-			if err != nil {
-				if !errors.Is(err, net.ErrClosed) {
-					if _, ok := err.(*websocket.CloseError); !ok {
-						log.Warnf("read message failed: %v", err)
-					}
+		mt, r, err := conn.NextReader()
+		if err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				if _, ok := err.(*websocket.CloseError); !ok {
+					log.Warnf("read message failed: %d %v", c.id, err)
 				}
-				_ = c.forceClose()
+			}
+
+			taskpool.Add(func() { c.forceClose() })
+			return
+		}
+
+		if mt != websocket.BinaryMessage {
+			_, _ = io.Copy(io.Discard, r)
+			continue
+		}
+
+		frameType, heartbeatTime, buf, err := packet.Read(r)
+		if err != nil {
+			taskpool.Add(func() { c.forceClose() })
+			return
+		}
+
+		switch c.State() {
+		case network.ConnClosed:
+			if frameType != packet.FrameHeartbeat {
+				buf.Release()
+			}
+			return
+		case network.ConnHanged:
+			if frameType != packet.FrameHeartbeat {
+				buf.Release()
 				return
 			}
+		}
 
-			if msgType != websocket.BinaryMessage {
-				continue
+		if frameType == packet.FrameHeartbeat {
+			// update heartbeat time
+			if c.cli.opts.heartbeatInterval > 0 {
+				c.lastHeartbeatTime.Store(time.Now().UnixNano())
 			}
 
-			if c.client.opts.heartbeatInterval > 0 {
-				c.lastHeartbeatTime.Store(xtime.Now().UnixNano())
+			if c.cli.heartbeatHandler != nil {
+				c.cli.heartbeatHandler(c, heartbeatTime)
 			}
+		} else {
+			// update heartbeat time
+			if c.cli.opts.heartbeatInterval > 0 {
+				index++
 
-			switch c.State() {
-			case network.ConnHanged:
-				continue
-			case network.ConnClosed:
-				return
-			default:
-				// ignore
+				if index%10 == 0 {
+					c.lastHeartbeatTime.Store(time.Now().UnixNano())
+				}
 			}
 
 			// ignore empty packet
-			if len(msgData) == 0 {
+			if buf.Len() == 0 {
+				buf.Release()
 				continue
 			}
 
-			// check heartbeat packet
-			isHeartbeat, err := packet.CheckHeartbeat(msgData)
-			if err != nil {
-				log.Errorf("check heartbeat message error: %v", err)
-				continue
-			}
-
-			// ignore heartbeat packet
-			if isHeartbeat {
-				continue
-			}
-
-			if c.client.receiveHandler != nil {
-				c.client.receiveHandler(c, msgData)
+			if frameType == packet.FrameHandshake && c.cli.handshakeHandler != nil {
+				c.cli.handshakeHandler(c, buf)
+			} else if c.cli.receiveHandler != nil {
+				c.cli.receiveHandler(c, buf)
+			} else {
+				buf.Release()
 			}
 		}
 	}
 }
 
-// 写入消息
-func (c *clientConn) write() {
-	var (
-		conn   = c.conn
-		ticker *time.Ticker
-	)
+// write writes messages.
+func (c *clientConn) write(conn *websocket.Conn) {
+	var tickerC <-chan time.Time
 
-	if c.client.opts.heartbeatInterval > 0 {
-		ticker = time.NewTicker(c.client.opts.heartbeatInterval)
+	if c.cli.opts.heartbeatInterval > 0 {
+		ticker := time.NewTicker(c.cli.opts.heartbeatInterval)
 		defer ticker.Stop()
-	} else {
-		ticker = &time.Ticker{C: make(chan time.Time, 1)}
+		tickerC = ticker.C
 	}
 
 	for {
 		select {
-		case t, ok := <-c.highPriorityTaskQueue:
+		case buf, ok := <-c.queue.Read():
 			if !ok {
 				return
 			}
 
-			if !c.doWrite(conn, t) {
-				return
-			}
-		case t, ok := <-ticker.C:
+			c.doWrite(conn, buf)
+		case t, ok := <-tickerC:
 			if !ok {
 				return
 			}
@@ -354,133 +401,70 @@ func (c *clientConn) write() {
 			if !c.doHandleHeartbeat(conn, t) {
 				return
 			}
-		default:
-			select {
-			case t, ok := <-c.highPriorityTaskQueue:
-				if !ok {
-					return
-				}
-
-				if !c.doWrite(conn, t) {
-					return
-				}
-			case t, ok := <-c.lowPriorityTaskQueue:
-				if !ok {
-					return
-				}
-
-				if !c.doWrite(conn, t) {
-					return
-				}
-			case t, ok := <-ticker.C:
-				if !ok {
-					return
-				}
-
-				if !c.doHandleHeartbeat(conn, t) {
-					return
-				}
-			}
 		}
 	}
 }
 
-// 执行写入操作
-func (c *clientConn) doWrite(conn *websocket.Conn, t *task) bool {
-	defer c.doRecycleToPool(t)
+// doWrite performs a write.
+//
+// It terminates the write goroutine after recognizing the close signal, and otherwise writes the
+// message data and releases the buffer.
+func (c *clientConn) doWrite(conn *websocket.Conn, buf buffer.Buffer) {
+	closeSig := buf.Len() == 0
 
-	if t.typ == closeSig {
-		c.rw.RLock()
-		if c.conn != nil {
-			c.done <- struct{}{}
-		}
-		c.rw.RUnlock()
-		return false
+	c.queue.Done(closeSig)
+
+	if closeSig {
+		buf.Release()
+		return
 	}
 
-	if c.isClosed() {
-		return false
+	if c.cli.opts.writeTimeout > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(c.cli.opts.writeTimeout))
 	}
 
-	if t.typ == heartbeatPacket {
-		if msg, err := packet.PackHeartbeat(); err != nil {
-			log.Errorf("pack heartbeat message error: %v", err)
-			return true
-		} else {
-			t.msg = msg
-		}
-	}
-
-	if err := conn.WriteMessage(websocket.BinaryMessage, t.msg); err != nil {
-		if !errors.Is(err, net.ErrClosed) {
-			if _, ok := err.(*websocket.CloseError); !ok {
-				log.Errorf("write message error: %v", err)
+	if err := writeBuffer(conn, buf); err != nil {
+		if _, ok := err.(*websocket.CloseError); !ok {
+			if !errors.Is(err, net.ErrClosed) {
+				log.Warnf("write message error: %v", err)
+				taskpool.Add(func() { c.forceClose() })
 			}
 		}
 	}
 
-	return true
+	buf.Release()
 }
 
-// 处理心跳
+// doHandleHeartbeat handles heartbeats.
+//
+// It checks whether the time of the last received message has timed out and triggers a force close
+// if so; otherwise it sends a heartbeat packet. It returns false when the write goroutine should
+// stop because the heartbeat timed out.
 func (c *clientConn) doHandleHeartbeat(conn *websocket.Conn, t time.Time) bool {
-	deadline := t.Add(-2 * c.client.opts.heartbeatInterval).UnixNano()
-
-	if c.lastHeartbeatTime.Load() < deadline {
+	if c.lastHeartbeatTime.Load() < t.Add(-2*c.cli.opts.heartbeatInterval).UnixNano() {
 		log.Debugf("connection heartbeat timeout, cid: %d", c.id)
-		_ = c.forceClose()
+
+		taskpool.Add(func() { c.forceClose() })
+
 		return false
 	} else {
-		if c.isClosed() {
-			return false
+		if c.cli.opts.writeTimeout > 0 {
+			_ = conn.SetWriteDeadline(time.Now().Add(c.cli.opts.writeTimeout))
 		}
 
-		if heartbeat, err := packet.PackHeartbeat(); err != nil {
-			log.Errorf("pack heartbeat message error: %v", err)
-		} else {
-			// send heartbeat packet
-			if err := conn.WriteMessage(websocket.BinaryMessage, heartbeat); err != nil {
-				log.Errorf("write heartbeat message error: %v", err)
-			}
+		hb := packet.PackHeartbeat()
+
+		if err := conn.WriteMessage(websocket.BinaryMessage, hb.Bytes()); err != nil {
+			log.Warnf("write heartbeat message error: %v", err)
 		}
+
+		hb.Release()
+
+		return true
 	}
-
-	return true
 }
 
-// 是否已关闭
+// isClosed reports whether the connection state is closed.
 func (c *clientConn) isClosed() bool {
 	return c.State() == network.ConnClosed
-}
-
-// 回收任务到对象池
-func (c *clientConn) doRecycleToPool(t *task) {
-	t.msg = nil
-	c.taskPool.Put(t)
-}
-
-// 写入任务到队列
-func (c *clientConn) doWriteToQueue(queue chan *task, typ int8, msg ...[]byte) error {
-	t := c.taskPool.Get().(*task)
-	t.typ = typ
-	if len(msg) > 0 {
-		t.msg = msg[0]
-	}
-
-	if c.client.opts.writeTimeout > 0 && len(queue) == cap(queue) {
-		ctx, cancel := context.WithTimeout(context.Background(), c.client.opts.writeTimeout)
-		defer cancel()
-
-		select {
-		case <-ctx.Done():
-			c.doRecycleToPool(t)
-			return ctx.Err()
-		case queue <- t:
-			return nil
-		}
-	}
-
-	queue <- t
-
-	return nil
 }

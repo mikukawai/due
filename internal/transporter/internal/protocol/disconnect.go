@@ -2,25 +2,26 @@ package protocol
 
 import (
 	"encoding/binary"
-	"io"
 
+	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
+	"github.com/dobyte/due/v2/internal/transporter/internal/def"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
-	"github.com/dobyte/due/v2/session"
 )
 
 const (
-	disconnectReqBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + b8 + b64 + b8
-	disconnectResBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + defaultCodeBytes
+	disconnectReqBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.B8 + def.B64 + def.B8
+	disconnectResBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.CodeBytes
 )
 
-// EncodeDisconnectReq 编码断连请求
-// 协议：size + header + route + seq + session kind + target + force
-func EncodeDisconnectReq(seq uint64, kind session.Kind, target int64, force bool) *buffer.NocopyBuffer {
+// EncodeDisconnectReq encodes a disconnect request.
+// Note that buf contains the full protocol.
+// Protocol: {size + header + route + seq} + private section: {session kind + target + force}
+func EncodeDisconnectReq(seq uint64, kind cluster.Session, target int64, force bool) *buffer.NocopyBuffer {
 	writer := buffer.MallocWriter(disconnectReqBytes)
-	writer.WriteUint32s(binary.BigEndian, uint32(disconnectReqBytes-defaultSizeBytes))
-	writer.WriteUint8s(dataBit)
+	writer.WriteUint32s(binary.BigEndian, uint32(disconnectReqBytes-def.SizeBytes))
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Disconnect)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint8s(uint8(kind))
@@ -30,48 +31,30 @@ func EncodeDisconnectReq(seq uint64, kind session.Kind, target int64, force bool
 	return buffer.NewNocopyBuffer(writer)
 }
 
-// DecodeDisconnectReq 解码端连请求
-// 协议：size + header + route + seq + session kind + target + force
-func DecodeDisconnectReq(data []byte) (seq uint64, kind session.Kind, target int64, force bool, err error) {
-	if len(data) != disconnectReqBytes {
+// DecodeDisconnectReq decodes a disconnect request.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {session kind + target + force}
+func DecodeDisconnectReq(buf buffer.Buffer) (kind cluster.Session, target int64, force bool, err error) {
+	if buf.Len() != def.B8+def.B64+def.B8 {
 		err = errors.ErrInvalidMessage
 		return
 	}
 
-	reader := buffer.NewReader(data)
-
-	if _, err = reader.Seek(defaultSizeBytes+defaultHeaderBytes+defaultRouteBytes, io.SeekStart); err != nil {
-		return
-	}
-
-	if seq, err = reader.ReadUint64(binary.BigEndian); err != nil {
-		return
-	}
-
-	var k uint8
-	if k, err = reader.ReadUint8(); err != nil {
-		return
-	} else {
-		kind = session.Kind(k)
-	}
-
-	if target, err = reader.ReadInt64(binary.BigEndian); err != nil {
-		return
-	}
-
-	if force, err = reader.ReadBool(); err != nil {
-		return
-	}
+	data := buf.Bytes()
+	kind = cluster.Session(data[0])
+	target = int64(binary.BigEndian.Uint64(data[def.B8 : def.B8+def.B64]))
+	force = data[def.B8+def.B64] == 1
 
 	return
 }
 
-// EncodeDisconnectRes 编码断连响应
-// 协议：size + header + route + seq + code
+// EncodeDisconnectRes encodes a disconnect response.
+// Note that buf contains the full protocol.
+// Protocol: {size + header + route + seq} + private section: {code}
 func EncodeDisconnectRes(seq uint64, code uint16) *buffer.NocopyBuffer {
 	writer := buffer.MallocWriter(disconnectResBytes)
-	writer.WriteUint32s(binary.BigEndian, uint32(disconnectResBytes-defaultSizeBytes))
-	writer.WriteUint8s(dataBit)
+	writer.WriteUint32s(binary.BigEndian, uint32(disconnectResBytes-def.SizeBytes))
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.Disconnect)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint16s(binary.BigEndian, code)
@@ -79,23 +62,13 @@ func EncodeDisconnectRes(seq uint64, code uint16) *buffer.NocopyBuffer {
 	return buffer.NewNocopyBuffer(writer)
 }
 
-// DecodeDisconnectRes 解码断连响应
-// 协议：size + header + route + seq + code
-func DecodeDisconnectRes(data []byte) (code uint16, err error) {
-	if len(data) != bindResBytes {
-		err = errors.ErrInvalidMessage
-		return
+// DecodeDisconnectRes decodes a disconnect response.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {code}
+func DecodeDisconnectRes(buf buffer.Buffer) (uint16, error) {
+	if buf.Len() != def.CodeBytes {
+		return 0, errors.ErrInvalidMessage
 	}
 
-	reader := buffer.NewReader(data)
-
-	if _, err = reader.Seek(-defaultCodeBytes, io.SeekEnd); err != nil {
-		return
-	}
-
-	if code, err = reader.ReadUint16(binary.BigEndian); err != nil {
-		return
-	}
-
-	return
+	return binary.BigEndian.Uint16(buf.Bytes()), nil
 }

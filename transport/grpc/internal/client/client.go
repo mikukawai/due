@@ -6,15 +6,21 @@ import (
 	"google.golang.org/grpc"
 )
 
+// Client is a microservice client that wraps a gRPC connection and provides generic method
+// invocation.
 type Client struct {
 	cc *grpc.ClientConn
 }
 
+// NewClient returns a new microservice client backed by the given gRPC client connection.
 func NewClient(cc *grpc.ClientConn) *Client {
 	return &Client{cc: cc}
 }
 
-// Call 调用服务方法
+// Call invokes a service method.
+//
+// It builds the full invocation path from service and method, and passes through any
+// grpc.CallOption.
 func (c *Client) Call(ctx context.Context, service, method string, args any, reply any, opts ...any) error {
 	path := ""
 
@@ -36,7 +42,7 @@ func (c *Client) Call(ctx context.Context, service, method string, args any, rep
 	return c.cc.Invoke(ctx, path, args, reply, options...)
 }
 
-// Client 获取GRPC客户端
+// Client returns the underlying gRPC client connection.
 func (c *Client) Client() any {
 	return c.cc
 }

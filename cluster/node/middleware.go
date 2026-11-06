@@ -1,26 +1,26 @@
 package node
 
+// MiddlewareHandler is the middleware handler.
 type MiddlewareHandler func(middleware *Middleware, ctx Context)
 
+// Middleware is a middleware.
+//
+// It is used to intercept and process messages uniformly before and after the route handlers run.
 type Middleware struct {
 	index        int
 	middlewares  []MiddlewareHandler
 	routeHandler RouteHandler
 }
 
-// 重置中间件
-func (m *Middleware) reset(middlewares []MiddlewareHandler, routeHandler RouteHandler) {
-	m.index = -1
-	m.middlewares = middlewares
-	m.routeHandler = routeHandler
-}
-
-// Next 下一个中间件
+// Next runs the next middleware.
 func (m *Middleware) Next(ctx Context) {
 	m.Skip(ctx, 1)
 }
 
-// Skip 跳过N个中间件
+// Skip skips the given number of middlewares.
+//
+// It runs the following middlewares in order and, once they are exhausted, runs the final route
+// handler.
 func (m *Middleware) Skip(ctx Context, skip int) {
 	if m.index >= len(m.middlewares) {
 		return
@@ -28,7 +28,7 @@ func (m *Middleware) Skip(ctx Context, skip int) {
 
 	version := ctx.incrVersion()
 
-	ctx.Cancel()
+	ctx.recoverDefer()
 
 	defer func() {
 		ctx.compareVersionExecDefer(version)
@@ -39,8 +39,8 @@ func (m *Middleware) Skip(ctx Context, skip int) {
 	m.index += skip
 
 	if m.index >= len(m.middlewares) {
-		m.routeHandler(ctx)
+		safeCallContextHandler(m.routeHandler, ctx)
 	} else {
-		m.middlewares[m.index](m, ctx)
+		safeCallMiddlewareHandler(m.middlewares[m.index], m, ctx)
 	}
 }

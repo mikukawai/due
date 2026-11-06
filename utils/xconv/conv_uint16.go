@@ -6,10 +6,12 @@ import (
 	"github.com/dobyte/due/v2/utils/xreflect"
 )
 
+// Uint16 converts val to a uint16.
 func Uint16(val any) uint16 {
 	return uint16(Uint64(val))
 }
 
+// Uint16s converts val to a uint16 slice.
 func Uint16s(val any) (slice []uint16) {
 	if val == nil {
 		return
@@ -22,6 +24,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]int:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -32,6 +37,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]int8:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -42,6 +50,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]int16:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -52,6 +63,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]int32:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -62,6 +76,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]int64:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -72,6 +89,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]uint:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -82,6 +102,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]uint8:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -89,6 +112,9 @@ func Uint16s(val any) (slice []uint16) {
 	case []uint16:
 		return v
 	case *[]uint16:
+		if v == nil {
+			return
+		}
 		return *v
 	case []uint32:
 		slice = make([]uint16, len(v))
@@ -96,6 +122,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]uint32:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -106,6 +135,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]uint64:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -116,6 +148,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]float32:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -126,6 +161,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]float64:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -136,6 +174,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]complex64:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -146,6 +187,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]complex128:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -156,6 +200,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]string:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -166,6 +213,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]bool:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -176,6 +226,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[]any:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -186,6 +239,9 @@ func Uint16s(val any) (slice []uint16) {
 			slice[i] = Uint16(v[i])
 		}
 	case *[][]byte:
+		if v == nil {
+			return
+		}
 		slice = make([]uint16, len(*v))
 		for i := range *v {
 			slice[i] = Uint16((*v)[i])
@@ -204,11 +260,13 @@ func Uint16s(val any) (slice []uint16) {
 	return
 }
 
+// Uint16Pointer converts val to a pointer to uint16.
 func Uint16Pointer(val any) *uint16 {
 	v := Uint16(val)
 	return &v
 }
 
+// Uint16sPointer converts val to a pointer to a uint16 slice.
 func Uint16sPointer(val any) *[]uint16 {
 	v := Uint16s(val)
 	return &v

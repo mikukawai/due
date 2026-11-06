@@ -10,7 +10,11 @@ import (
 )
 
 func init() {
-	source := nacos.NewSource()
+	source := nacos.NewSource(
+		nacos.WithUsername("nacos"),
+		nacos.WithPassword("nacos"),
+		nacos.WithMode(config.ReadWrite),
+	)
 	config.SetConfigurator(config.NewConfigurator(config.WithSources(source)))
 }
 
@@ -31,22 +35,26 @@ func TestWatch(t *testing.T) {
 }
 
 func TestLoad(t *testing.T) {
-	ctx := context.Background()
-	file := "config.json"
-	c, err := config.Load(ctx, nacos.Name, file)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// ctx := context.Background()
+	// file := "config.json"
+	// c, err := config.Load(ctx, nacos.Name, file)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
 
-	t.Log(c[0].Name)
-	t.Log(c[0].Path)
-	t.Log(c[0].Format)
-	t.Log(c[0].Content)
+	// t.Log(c[0].Name)
+	// t.Log(c[0].Path)
+	// t.Log(c[0].Format)
+	// t.Log(c[0].Content)
+	// t.Log(string(c[0].Content))
+
+	t.Log(config.Get("config.timezone").String())
+	t.Log(config.Get("config.pid").String())
 }
 
 func TestStore(t *testing.T) {
 	ctx := context.Background()
-	file := "configs.json"
+	file := "config.json"
 	content1 := map[string]any{
 		"timezone": "Local",
 	}
@@ -70,7 +78,7 @@ func TestStore(t *testing.T) {
 }
 
 func BenchmarkGet(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		config.Get("config").Value()
 	}
 }

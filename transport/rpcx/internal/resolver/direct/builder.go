@@ -1,116 +1,68 @@
 package direct
 
 import (
-	"context"
-	"github.com/dobyte/due/v2/cluster"
+	"net"
+	"net/url"
+	"sync"
+
 	"github.com/dobyte/due/v2/core/endpoint"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/registry"
 	cli "github.com/smallnest/rpcx/client"
-	"net"
-	"net/url"
-	"sync"
-	"time"
 )
 
 const scheme = "direct"
 
-const defaultTimeout = 10 * time.Second
-
+// Builder is the resolver builder for direct connection mode.
+//
+// It supports both direct://address and direct://instance_ID forms.
 type Builder struct {
-	dis       registry.Discovery
-	ctx       context.Context
-	cancel    context.CancelFunc
-	watcher   registry.Watcher
 	rw        sync.RWMutex
 	pairs     map[string][]*cli.KVPair
 	resolvers sync.Map
 }
 
-func NewBuilder(dis registry.Discovery) *Builder {
-	b := &Builder{}
-	b.dis = dis
-	b.ctx, b.cancel = context.WithCancel(context.Background())
-
-	if err := b.init(); err != nil {
-		log.Fatalf("init client builder failed: %v", err)
-	}
-
-	return b
+// NewBuilder returns a new builder for the direct connection resolver.
+func NewBuilder() *Builder {
+	return &Builder{}
 }
 
+// Scheme returns the resolver scheme.
 func (b *Builder) Scheme() string {
 	return scheme
 }
 
+// Build builds a service discovery instance.
+//
+// It returns a peer-to-peer discovery instance when the address can be parsed directly as host:port,
+// and otherwise looks up the cached address by instance ID.
 func (b *Builder) Build(target *url.URL) (cli.ServiceDiscovery, error) {
 	if _, _, err := net.SplitHostPort(target.Host); err == nil {
 		return cli.NewPeer2PeerDiscovery("tcp@"+target.Host, "")
-	} else {
-		b.rw.RLock()
-		pairs, ok := b.pairs[target.Host]
-		b.rw.RUnlock()
-		if !ok {
-			return nil, errors.ErrNotFoundServiceAddress
-		}
-
-		r := newResolver(target.Host, b)
-		r.updateState(pairs)
-
-		b.resolvers.Store(target.Host, r)
-
-		return r, nil
 	}
+
+	b.rw.RLock()
+	pairs, ok := b.pairs[target.Host]
+	b.rw.RUnlock()
+	if !ok {
+		return nil, errors.ErrNotFoundServiceAddress
+	}
+
+	r := newResolver(target.Host, b)
+	r.updateState(pairs)
+
+	b.resolvers.Store(target.Host, r)
+
+	return r, nil
 }
 
-func (b *Builder) init() error {
-	if b.dis == nil {
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(b.ctx, defaultTimeout)
-	watcher, err := b.dis.Watch(ctx, cluster.Mesh.String())
-	cancel()
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel = context.WithTimeout(b.ctx, defaultTimeout)
-	instances, err := b.dis.Services(ctx, cluster.Mesh.String())
-	cancel()
-	if err != nil {
-		_ = watcher.Stop()
-
-		return err
-	}
-
-	b.watcher = watcher
-	b.updateInstances(instances)
-
-	go b.watch()
-
-	return nil
-}
-
-func (b *Builder) watch() {
-	for {
-		select {
-		case <-b.ctx.Done():
-			return
-		default:
-			// exec watch
-		}
-		instances, err := b.watcher.Next()
-		if err != nil {
-			continue
-		}
-
-		b.updateInstances(instances)
-	}
-}
-
-func (b *Builder) updateInstances(instances []*registry.ServiceInstance) {
+// UpdateStates updates the state of service instances and synchronizes it to each service discovery
+// instance.
+//
+// It aggregates instance endpoints into address pairs keyed by instance ID, and pushes an empty
+// state when an instance goes offline.
+func (b *Builder) UpdateStates(instances []*registry.ServiceInstance) {
 	pairs := make(map[string][]*cli.KVPair, len(instances))
 	for _, instance := range instances {
 		ep, err := endpoint.ParseEndpoint(instance.Endpoint)
@@ -134,6 +86,17 @@ func (b *Builder) updateInstances(instances []*registry.ServiceInstance) {
 	})
 }
 
+// removeResolver removes a service discovery instance.
 func (b *Builder) removeResolver(r *Resolver) {
 	b.resolvers.Delete(r.name)
+}
+
+// Close closes the builder and releases all service discovery instances.
+func (b *Builder) Close() error {
+	b.resolvers.Range(func(_, value any) bool {
+		value.(*Resolver).Close()
+		return true
+	})
+
+	return nil
 }

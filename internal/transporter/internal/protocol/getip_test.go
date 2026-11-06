@@ -1,27 +1,31 @@
 package protocol_test
 
 import (
-	"github.com/dobyte/due/v2/internal/transporter/internal/codes"
-	"github.com/dobyte/due/v2/internal/transporter/internal/protocol"
-	"github.com/dobyte/due/v2/session"
 	"testing"
+
+	"github.com/dobyte/due/v2/cluster"
+	"github.com/dobyte/due/v2/core/buffer"
+	"github.com/dobyte/due/v2/internal/transporter/internal/codes"
+	"github.com/dobyte/due/v2/internal/transporter/internal/def"
+	"github.com/dobyte/due/v2/internal/transporter/internal/protocol"
 )
 
 func TestEncodeGetIPReq(t *testing.T) {
-	buffer := protocol.EncodeGetIPReq(1, session.User, 3)
+	buffer := protocol.EncodeGetIPReq(1, cluster.User, 3)
 
 	t.Log(buffer.Bytes())
 }
 
 func TestDecodeGetIPReq(t *testing.T) {
-	buffer := protocol.EncodeGetIPReq(1, session.User, 3)
+	req := protocol.EncodeGetIPReq(1, cluster.User, 3)
+	buf := buffer.NewBytes(req.Bytes()[def.SizeBytes+def.HeaderBytes+def.RouteBytes+def.SeqBytes:])
+	defer req.Release()
 
-	seq, kind, target, err := protocol.DecodeGetIPReq(buffer.Bytes())
+	kind, target, err := protocol.DecodeGetIPReq(buf)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	t.Logf("seq: %v", seq)
 	t.Logf("kind: %v", kind)
 	t.Logf("target: %v", target)
 }
@@ -33,9 +37,11 @@ func TestEncodeGetIPRes(t *testing.T) {
 }
 
 func TestDecodeGetIPRes(t *testing.T) {
-	buffer := protocol.EncodeGetIPRes(1, codes.OK, "127.0.0.1")
+	req := protocol.EncodeGetIPRes(1, codes.OK, "127.0.0.1")
+	buf := buffer.NewBytes(req.Bytes()[def.SizeBytes+def.HeaderBytes+def.RouteBytes+def.SeqBytes:])
+	defer req.Release()
 
-	code, ip, err := protocol.DecodeGetIPRes(buffer.Bytes())
+	code, ip, err := protocol.DecodeGetIPRes(buf)
 	if err != nil {
 		t.Fatal(err)
 	}

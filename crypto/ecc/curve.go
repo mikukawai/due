@@ -13,6 +13,7 @@ const (
 	P521
 )
 
+// New returns the elliptic curve of c. It falls back to P256 when c is not a valid curve type.
 func (c Curve) New() elliptic.Curve {
 	switch c {
 	case P224:

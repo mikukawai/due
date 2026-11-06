@@ -6,10 +6,12 @@ import (
 	"github.com/dobyte/due/v2/utils/xreflect"
 )
 
+// Int32 converts val to an int32.
 func Int32(val any) int32 {
 	return int32(Int64(val))
 }
 
+// Int32s converts val to an int32 slice.
 func Int32s(val any) (slice []int32) {
 	if val == nil {
 		return
@@ -22,6 +24,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]int:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -32,6 +37,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]int8:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -42,6 +50,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]int16:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -49,6 +60,9 @@ func Int32s(val any) (slice []int32) {
 	case []int32:
 		return v
 	case *[]int32:
+		if v == nil {
+			return
+		}
 		return *v
 	case []int64:
 		slice = make([]int32, len(v))
@@ -56,6 +70,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]int64:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -66,6 +83,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]uint:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -76,6 +96,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]uint8:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -86,6 +109,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]uint16:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -96,6 +122,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]uint32:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -106,6 +135,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]uint64:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -116,6 +148,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]float32:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -126,6 +161,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]float64:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -136,6 +174,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]complex64:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -146,6 +187,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]complex128:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -156,6 +200,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]string:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -166,6 +213,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]bool:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -176,6 +226,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[]any:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -186,6 +239,9 @@ func Int32s(val any) (slice []int32) {
 			slice[i] = Int32(v[i])
 		}
 	case *[][]byte:
+		if v == nil {
+			return
+		}
 		slice = make([]int32, len(*v))
 		for i := range *v {
 			slice[i] = Int32((*v)[i])
@@ -204,11 +260,13 @@ func Int32s(val any) (slice []int32) {
 	return
 }
 
+// Int32Pointer converts val to a pointer to int32.
 func Int32Pointer(val any) *int32 {
 	v := Int32(val)
 	return &v
 }
 
+// Int32sPointer converts val to a pointer to an int32 slice.
 func Int32sPointer(val any) *[]int32 {
 	v := Int32s(val)
 	return &v

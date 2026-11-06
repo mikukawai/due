@@ -6,23 +6,41 @@ import (
 	"time"
 )
 
+// Goroutines is a goroutine group that manages a batch of functions to run concurrently.
 type Goroutines struct {
+	mu  sync.Mutex
 	fns []func()
 }
 
+// NewGoroutines returns a new Goroutines group.
 func NewGoroutines() *Goroutines {
 	return &Goroutines{}
 }
 
-// Add 添加协程函数
+// Add appends the given functions to the group and returns the group itself so that calls can be
+// chained.
 func (g *Goroutines) Add(fns ...func()) *Goroutines {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	g.fns = append(g.fns, fns...)
+
 	return g
 }
 
-// Run 运行协程函数
+// Run starts every function the group holds, each in its own goroutine, and waits for them
+// according to ctx.
+//
+// The group is emptied before the functions run, so the same instance can be reused. When no
+// timeout is given, Run blocks until all functions have finished; when a timeout is given, it
+// returns early on timeout without waiting for the remaining functions.
 func (g *Goroutines) Run(ctx context.Context, timeout ...time.Duration) {
-	if len(g.fns) == 0 {
+	g.mu.Lock()
+	fns := g.fns
+	g.fns = nil
+	g.mu.Unlock()
+
+	if len(fns) == 0 {
 		return
 	}
 
@@ -33,10 +51,10 @@ func (g *Goroutines) Run(ctx context.Context, timeout ...time.Duration) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(len(g.fns))
+	wg.Add(len(fns))
 
-	for i := range g.fns {
-		fn := g.fns[i]
+	for i := range fns {
+		fn := fns[i]
 		Go(func() {
 			defer wg.Done()
 			fn()

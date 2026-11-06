@@ -5,35 +5,39 @@ import (
 	"net"
 	"sync/atomic"
 
-	ctls "github.com/dobyte/due/v2/core/tls"
 	"github.com/dobyte/due/v2/network"
 )
 
 type client struct {
-	opts              *clientOptions            // 配置
-	id                atomic.Int64              // 连接ID
-	connectHandler    network.ConnectHandler    // 连接打开hook函数
-	disconnectHandler network.DisconnectHandler // 连接关闭hook函数
-	receiveHandler    network.ReceiveHandler    // 接收消息hook函数
+	opts              *clientOptions            // Options
+	cid               atomic.Int64              // Connection ID
+	connectHandler    network.ConnectHandler    // Handler invoked when a connection is opened
+	disconnectHandler network.DisconnectHandler // Handler invoked when a connection is closed
+	heartbeatHandler  network.HeartbeatHandler  // Handler invoked when a heartbeat is received
+	receiveHandler    network.ReceiveHandler    // Handler invoked when a message is received
+	handshakeHandler  network.HandshakeHandler  // Handler invoked when a handshake frame is received
 }
 
 var _ network.Client = &client{}
 
+// NewClient returns a new client.
 func NewClient(opts ...ClientOption) network.Client {
 	o := defaultClientOptions()
 	for _, opt := range opts {
 		opt(o)
 	}
 
-	return &client{opts: o}
+	c := &client{}
+	c.opts = o
+
+	return c
 }
 
-// Dial 拨号连接
+// Dial dials a connection.
+//
+// When addr is empty the address from the client options is used.
 func (c *client) Dial(addr ...string) (network.Conn, error) {
-	var (
-		conn    net.Conn
-		address string
-	)
+	var address string
 
 	if len(addr) > 0 && addr[0] != "" {
 		address = addr[0]
@@ -46,42 +50,59 @@ func (c *client) Dial(addr ...string) (network.Conn, error) {
 		return nil, err
 	}
 
-	if c.opts.caFile != "" {
-		config, err := ctls.MakeTCPClientTLSConfig(c.opts.caFile, c.opts.serverName)
-		if err != nil {
-			return nil, err
-		}
+	var conn net.Conn
 
-		dialer := &net.Dialer{Timeout: c.opts.dialTimeout}
-
-		if conn, err = tls.DialWithDialer(dialer, tcpAddr.Network(), tcpAddr.String(), config); err != nil {
-			return nil, err
-		}
+	if c.opts.tlsConfig != nil {
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: c.opts.dialTimeout}, tcpAddr.Network(), tcpAddr.String(), c.opts.tlsConfig)
 	} else {
-		if conn, err = net.DialTimeout(tcpAddr.Network(), tcpAddr.String(), c.opts.dialTimeout); err != nil {
-			return nil, err
-		}
+		conn, err = net.DialTimeout(tcpAddr.Network(), tcpAddr.String(), c.opts.dialTimeout)
 	}
 
-	return newClientConn(c, c.id.Add(1), conn), nil
+	if err != nil {
+		return nil, err
+	}
+
+	setNoDelay(conn)
+
+	return newClientConn(c, conn), nil
 }
 
-// Protocol 协议
+// Protocol returns the protocol name.
 func (c *client) Protocol() string {
 	return protocol
 }
 
-// OnConnect 监听连接打开
+// OnConnect registers the handler invoked when a connection is opened.
+//
+// It must be registered before Dial; registering it after Dial causes a data race.
 func (c *client) OnConnect(handler network.ConnectHandler) {
 	c.connectHandler = handler
 }
 
-// OnDisconnect 监听连接关闭
+// OnDisconnect registers the handler invoked when a connection is closed.
+//
+// It must be registered before Dial; registering it after Dial causes a data race.
 func (c *client) OnDisconnect(handler network.DisconnectHandler) {
 	c.disconnectHandler = handler
 }
 
-// OnReceive 监听接收到消息
+// OnHeartbeat registers the handler invoked when a heartbeat is received.
+//
+// It must be registered before Dial; registering it after Dial causes a data race.
+func (c *client) OnHeartbeat(handler network.HeartbeatHandler) {
+	c.heartbeatHandler = handler
+}
+
+// OnReceive registers the handler invoked when a message is received.
+//
+// It must be registered before Dial; registering it after Dial causes a data race.
 func (c *client) OnReceive(handler network.ReceiveHandler) {
 	c.receiveHandler = handler
+}
+
+// OnHandshake registers the handler invoked when a handshake frame is received.
+//
+// It must be registered before Dial; registering it after Dial causes a data race.
+func (c *client) OnHandshake(handler network.HandshakeHandler) {
+	c.handshakeHandler = handler
 }

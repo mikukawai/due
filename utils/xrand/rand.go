@@ -1,212 +1,175 @@
 package xrand
 
 import (
-	"math"
-	"math/rand"
-	"strconv"
-	"strings"
 	"time"
 
-	"github.com/dobyte/due/v2/log"
+	"github.com/dobyte/due/v2/core/rand"
 )
 
 const (
-	LetterSeed           = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" // 字母字
-	LetterLowerSeed      = "abcdefghijklmnopqrstuvwxyz"                           // 小写字母
-	LetterUpperSeed      = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"                           // 大写字母
-	DigitSeed            = "0123456789"                                           // 数字
-	DigitWithoutZeroSeed = "123456789"                                            // 无0数字
-	SymbolSeed           = "!\\\"#$%&'()*+,-./:;<=>?@[\\\\]^_`{|}~"               // 特殊字符
+	LetterSeed           = rand.LetterSeed           // Letters in both upper and lower case
+	LetterLowerSeed      = rand.LetterLowerSeed      // Lower-case letters
+	LetterUpperSeed      = rand.LetterUpperSeed      // Upper-case letters
+	DigitSeed            = rand.DigitSeed            // Digits
+	DigitWithoutZeroSeed = rand.DigitWithoutZeroSeed // Digits without zero
+	SymbolSeed           = rand.SymbolSeed           // Special symbols
 )
 
-var globalRand = rand.New(rand.NewSource(time.Now().UnixNano()))
+// globalRand is the source of random numbers for the top-level
+// convenience functions.
+var globalRand = rand.NewRand(&rand.PseudoRandom{})
 
-// Rand 获取全局随机对象
-func Rand() *rand.Rand {
-	return globalRand
+// Uint32 returns a pseudo-random 32-bit unsigned integer.
+func Uint32() uint32 {
+	return globalRand.Uint32()
 }
 
-// Str 生成指定长度的字符串
-func Str(seed string, length int) (str string) {
-	if length <= 0 {
-		return ""
-	}
-
-	r := []rune(seed)
-	n := len(r)
-	if n == 0 {
-		log.Warnf("invalid seed")
-		return
-	}
-
-	for range length {
-		pos := globalRand.Intn(n)
-		str += string(r[pos : pos+1])
-	}
-
-	return
+// Uint64 returns a pseudo-random 64-bit unsigned integer.
+func Uint64() uint64 {
+	return globalRand.Uint64()
 }
 
-// Letters 生成指定长度的字母字符串
+// Int32 returns a non-negative pseudo-random 31-bit integer.
+func Int32() int32 {
+	return globalRand.Int32()
+}
+
+// Int returns a non-negative pseudo-random integer.
+func Int() int {
+	return globalRand.Int()
+}
+
+// Uint returns a pseudo-random unsigned integer.
+func Uint() uint {
+	return globalRand.Uint()
+}
+
+// Int64N returns a non-negative pseudo-random 64-bit integer in [0, n). n must be greater than 0.
+func Int64N(n int64) int64 {
+	return globalRand.Int64N(n)
+}
+
+// Uint64N returns a non-negative pseudo-random 64-bit unsigned integer in [0, n). n must be greater
+// than 0.
+func Uint64N(n uint64) uint64 {
+	return globalRand.Uint64N(n)
+}
+
+// Int32N returns a non-negative pseudo-random 32-bit integer in [0, n). n must be greater than 0.
+func Int32N(n int32) int32 {
+	return globalRand.Int32N(n)
+}
+
+// Uint32N returns a non-negative pseudo-random 32-bit unsigned integer in [0, n). n must be greater
+// than 0.
+func Uint32N(n uint32) uint32 {
+	return globalRand.Uint32N(n)
+}
+
+// IntN returns a non-negative pseudo-random integer in [0, n). n must be greater than 0.
+func IntN(n int) int {
+	return globalRand.IntN(n)
+}
+
+// UintN returns a non-negative pseudo-random unsigned integer in [0, n). n must be greater than 0.
+func UintN(n uint) uint {
+	return globalRand.UintN(n)
+}
+
+// Float64 returns a pseudo-random 64-bit float in [0.0, 1.0).
+func Float64() float64 {
+	return globalRand.Float64()
+}
+
+// Float32 returns a pseudo-random 32-bit float in [0.0, 1.0).
+func Float32() float32 {
+	return globalRand.Float32()
+}
+
+// Perm returns a pseudo-random permutation of the integers in [0, n).
+func Perm(n int) []int {
+	return globalRand.Perm(n)
+}
+
+// ExpFloat64 returns a 64-bit float drawn from an exponential distribution with rate parameter
+// (lambda) 1 and mean 1.
+func ExpFloat64() float64 {
+	return globalRand.ExpFloat64()
+}
+
+// NormFloat64 returns a 64-bit float drawn from the standard normal distribution, with mean 0 and
+// standard deviation 1.
+func NormFloat64() float64 {
+	return globalRand.NormFloat64()
+}
+
+// Str returns a string of the given length built from the characters of seed.
+func Str(seed string, length int) string {
+	return globalRand.Str(seed, length)
+}
+
+// Letters returns a string of the given length made of letters.
 func Letters(length int) string {
-	return Str(LetterSeed, length)
+	return globalRand.Letters(length)
 }
 
-// Digits 生成指定长度的数字字符串
+// Digits returns a string of the given length made of digits. The optional hasLeadingZero reports
+// whether the string may start with zero.
 func Digits(length int, hasLeadingZero ...bool) string {
-	if len(hasLeadingZero) > 0 && hasLeadingZero[0] {
-		return Str(DigitSeed, length)
-	}
-
-	if length == 1 {
-		return Str(DigitWithoutZeroSeed, 1)
-	}
-
-	return Str(DigitWithoutZeroSeed, 1) + Str(DigitSeed, length-1)
+	return globalRand.Digits(length, hasLeadingZero...)
 }
 
-// Symbols 生成指定长度的特殊字符串
+// Symbols returns a string of the given length made of special characters.
 func Symbols(length int) string {
-	return Str(SymbolSeed, length)
+	return globalRand.Symbols(length)
 }
 
-// Int 生成[min,max]的整数
-func Int(min, max int) int {
-	if min == max {
-		return min
-	}
-
-	if min > max {
-		min, max = max, min
-	}
-
-	return globalRand.Intn(max+1-min) + min
+// IntR returns an integer in [min, max].
+func IntR(min, max int) int {
+	return globalRand.IntR(min, max)
 }
 
-// Int32 生成[min,max]范围间的32位整数，
-func Int32(min, max int32) int32 {
-	if min == max {
-		return min
-	}
-
-	if min > max {
-		min, max = max, min
-	}
-
-	return globalRand.Int31n(max+1-min) + min
+// Int32R returns a 32-bit integer in [min, max].
+func Int32R(min, max int32) int32 {
+	return globalRand.Int32R(min, max)
 }
 
-// Int64 生成[min,max]范围间的64位整数
-func Int64(min, max int64) int64 {
-	if min == max {
-		return min
-	}
-
-	if min > max {
-		min, max = max, min
-	}
-
-	return globalRand.Int63n(max+1-min) + min
+// Int64R returns a 64-bit integer in [min, max].
+func Int64R(min, max int64) int64 {
+	return globalRand.Int64R(min, max)
 }
 
-// Float32 生成[min,max)范围间的32位浮点数
-func Float32(min, max float32) float32 {
-	if min == max {
-		return min
-	}
-
-	if min > max {
-		min, max = max, min
-	}
-
-	return min + globalRand.Float32()*(max-min)
+// Float32R returns a 32-bit float in [min, max).
+func Float32R(min, max float32) float32 {
+	return globalRand.Float32R(min, max)
 }
 
-// Float64 生成[min,max)范围间的64位浮点数
-func Float64(min, max float64) float64 {
-	if min == max {
-		return min
-	}
-
-	if min > max {
-		min, max = max, min
-	}
-
-	return min + globalRand.Float64()*(max-min)
+// Float64R returns a 64-bit float in [min, max).
+func Float64R(min, max float64) float64 {
+	return globalRand.Float64R(min, max)
 }
 
-// Duration 生成[min,max]范围间的时间间隔
+// Duration returns a time interval in [min, max].
 func Duration(min, max time.Duration) time.Duration {
-	return time.Duration(Int64(int64(min), int64(max)))
+	return globalRand.Duration(min, max)
 }
 
-// Lucky 根据概率抽取幸运值
+// Lucky reports whether a lucky draw with the given probability hits. The optional base is the
+// probability denominator and defaults to 100.
 func Lucky(probability float64, base ...float64) bool {
-	if probability <= 0 {
-		return false
-	}
-
-	b := float64(100)
-	if len(base) > 0 {
-		b = base[0]
-	}
-
-	if probability >= b {
-		return true
-	}
-
-	str := strconv.FormatFloat(probability, 'f', -1, 64)
-	scale := float64(0)
-
-	if i := strings.IndexByte(str, '.'); i > 0 {
-		scale = math.Pow10(len(str) - i - 1)
-	}
-
-	return Int64(1, int64(b*scale)) <= int64(probability*scale)
+	return globalRand.Lucky(probability, base...)
 }
 
-// Weight 权重随机
-func Weight(fn func(v any) float64, list ...any) int {
-	if len(list) == 0 {
-		return -1
-	}
-
-	total := float64(0)
-	scale := float64(1)
-
-	for _, item := range list {
-		weight := fn(item)
-		str := strconv.FormatFloat(weight, 'f', -1, 64)
-
-		if i := strings.IndexByte(str, '.'); i > 0 {
-			scale = math.Max(scale, math.Pow10(len(str)-i-1))
-		}
-
-		total += weight
-	}
-
-	sum := int64(total * scale)
-
-	if sum == 0 {
-		return Int(1, len(list))
-	}
-
-	weight := Int64(1, sum)
-	acc := int64(0)
-
-	for i, item := range list {
-		acc += int64(fn(item) * scale)
-		if weight <= acc {
-			return i
-		}
-	}
-
-	return Int(1, len(list))
+// Weight performs a weighted random selection over list, where fn returns the weight of an item. It
+// returns false when the total weight is invalid (<= 0).
+//
+// On success it returns the index of the selected item, the item itself and true. When nothing is
+// selected it returns -1, the zero value of T and false.
+func Weight[T any](fn func(v T) float64, list ...T) (int, T, bool) {
+	return globalRand.Weight(fn, list...)
 }
 
-// Shuffle 打乱数组
-func Shuffle(list []any) {
-	globalRand.Shuffle(len(list), func(i, j int) {
-		list[i], list[j] = list[j], list[i]
-	})
+// Shuffle randomly reorders list in place.
+func Shuffle[T any](list []T) {
+	globalRand.Shuffle(list)
 }

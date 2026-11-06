@@ -1,7 +1,6 @@
 package nacos
 
 import (
-	"context"
 	"time"
 
 	"github.com/dobyte/due/v2/etc"
@@ -12,7 +11,8 @@ const (
 	defaultUrl         = "http://127.0.0.1:8848/nacos"
 	defaultClusterName = "DEFAULT"
 	defaultGroupName   = "DEFAULT_GROUP"
-	defaultTimeout     = "3s"
+	defaultTimeout     = "10s"
+	defaultHeartbeat   = "5s"
 	defaultNamespaceId = ""
 	defaultEndpoint    = ""
 	defaultRegionId    = ""
@@ -31,6 +31,7 @@ const (
 	defaultClusterNameKey = "etc.registry.nacos.clusterName"
 	defaultGroupNameKey   = "etc.registry.nacos.groupName"
 	defaultTimeoutKey     = "etc.registry.nacos.timeout"
+	defaultHeartbeatKey   = "etc.registry.nacos.heartbeat"
 	defaultNamespaceIdKey = "etc.registry.nacos.namespaceId"
 	defaultEndpointKey    = "etc.registry.nacos.endpoint"
 	defaultRegionIdKey    = "etc.registry.nacos.regionId"
@@ -44,86 +45,88 @@ const (
 	defaultLogLevelKey    = "etc.registry.nacos.logLevel"
 )
 
+// Option is a service registry and discovery option.
 type Option func(o *options)
 
+// options holds the Nacos registry configuration.
 type options struct {
-	// 上下文
-	// 默认context.Background
-	ctx context.Context
-
-	// 服务器地址 [scheme://]ip:port[/nacos]
-	// 默认为[]string{http://127.0.0.1:8848/nacos}
+	// Server addresses in the form [scheme://]ip:port[/nacos].
+	// Defaults to []string{http://127.0.0.1:8848/nacos}.
 	urls []string
 
-	// 外部客户端
-	// 外部客户端配置，存在外部客户端时，优先使用外部客户端，默认为nil
+	// External client.
+	// When an external client is provided it takes precedence over the built-in client and defaults to nil.
 	client naming_client.INamingClient
 
-	// 集群名称
-	// 默认为DEFAULT
+	// Cluster name.
+	// Defaults to DEFAULT.
 	clusterName string
 
-	// 群组名称
-	// 默认为DEFAULT_GROUP
+	// Group name.
+	// Defaults to DEFAULT_GROUP.
 	groupName string
 
-	// 请求Nacos服务端超时时间
-	// 默认为3秒
+	// Timeout of requests to the Nacos server.
+	// Defaults to 10 seconds.
 	timeout time.Duration
 
-	// ACM的命名空间Id
-	// 默认为空
+	// Heartbeat interval of the Nacos client.
+	// Defaults to 5 seconds.
+	heartbeat time.Duration
+
+	// Namespace ID of ACM.
+	// Defaults to empty.
 	namespaceId string
 
-	// 当使用ACM时，需要该配置. https://help.aliyun.com/document_detail/130146.html
-	// 默认为空
+	// Endpoint required when ACM is used. See https://help.aliyun.com/document_detail/130146.html.
+	// Defaults to empty.
 	endpoint string
 
-	// ACM&KMS的regionId，用于配置中心的鉴权
-	// 默认为空
+	// regionId of ACM and KMS, used for authentication of the configuration center.
+	// Defaults to empty.
 	regionId string
 
-	// ACM&KMS的AccessKey，用于配置中心的鉴权
-	// 默认为空
+	// AccessKey of ACM and KMS, used for authentication of the configuration center.
+	// Defaults to empty.
 	accessKey string
 
-	// ACM&KMS的SecretKey，用于配置中心的鉴权
-	// 默认为空
+	// SecretKey of ACM and KMS, used for authentication of the configuration center.
+	// Defaults to empty.
 	secretKey string
 
-	// 是否开启kms，kms可以参考文档 https://help.aliyun.com/product/28933.html
-	// 同时DataId必须以"cipher-"作为前缀才会启动加解密逻辑
-	// 默认不开启
+	// Whether KMS is enabled. See https://help.aliyun.com/product/28933.html.
+	// The DataId must be prefixed with "cipher-" for the encryption and decryption logic to start.
+	// Disabled by default.
 	openKMS bool
 
-	// 缓存service信息的目录
-	// 默认为./run/nacos/naming/cache
+	// Directory caching the service information.
+	// Defaults to ./run/nacos/naming/cache.
 	cacheDir string
 
-	// Nacos服务端的API鉴权Username
-	// 默认为空
+	// Username for the Nacos server API authentication.
+	// Defaults to empty.
 	username string
 
-	// Nacos服务端的API鉴权Password
-	// 默认为空
+	// Password for the Nacos server API authentication.
+	// Defaults to empty.
 	password string
 
-	// 日志存储路径
-	// 默认为./run/nacos/naming/log
+	// Log storage path.
+	// Defaults to ./run/nacos/naming/log.
 	logDir string
 
-	// 日志输出级别
-	// 默认为info
+	// Log output level.
+	// Defaults to info.
 	logLevel string
 }
 
 func defaultOptions() *options {
 	return &options{
-		ctx:         context.Background(),
 		urls:        etc.Get(defaultUrlsKey, []string{defaultUrl}).Strings(),
 		clusterName: etc.Get(defaultClusterNameKey, defaultClusterName).String(),
 		groupName:   etc.Get(defaultGroupNameKey, defaultGroupName).String(),
 		timeout:     etc.Get(defaultTimeoutKey, defaultTimeout).Duration(),
+		heartbeat:   etc.Get(defaultHeartbeatKey, defaultHeartbeat).Duration(),
 		namespaceId: etc.Get(defaultNamespaceIdKey, defaultNamespaceId).String(),
 		endpoint:    etc.Get(defaultEndpointKey, defaultEndpoint).String(),
 		regionId:    etc.Get(defaultRegionIdKey, defaultRegionId).String(),
@@ -138,87 +141,87 @@ func defaultOptions() *options {
 	}
 }
 
-// WithContext 设置context
-func WithContext(ctx context.Context) Option {
-	return func(o *options) { o.ctx = ctx }
-}
-
-// WithUrls 设置服务器地址
+// WithUrls sets the server addresses.
 func WithUrls(urls ...string) Option {
 	return func(o *options) { o.urls = urls }
 }
 
-// WithClient 设置外部客户端
+// WithClient sets the external client.
 func WithClient(client naming_client.INamingClient) Option {
 	return func(o *options) { o.client = client }
 }
 
-// WithClusterName 设置集群名称
+// WithClusterName sets the cluster name.
 func WithClusterName(clusterName string) Option {
 	return func(o *options) { o.clusterName = clusterName }
 }
 
-// WithGroupName 设置群组名称
+// WithGroupName sets the group name.
 func WithGroupName(groupName string) Option {
 	return func(o *options) { o.groupName = groupName }
 }
 
-// WithTimeout 设置请求Nacos服务端超时时间
+// WithTimeout sets the timeout of requests to the Nacos server.
 func WithTimeout(timeout time.Duration) Option {
 	return func(o *options) { o.timeout = timeout }
 }
 
-// WithNamespaceId 设置ACM的命名空间Id
+// WithHeartbeat sets the heartbeat interval.
+func WithHeartbeat(heartbeat time.Duration) Option {
+	return func(o *options) { o.heartbeat = heartbeat }
+}
+
+// WithNamespaceId sets the ACM namespace ID.
 func WithNamespaceId(namespaceId string) Option {
 	return func(o *options) { o.namespaceId = namespaceId }
 }
 
-// WithEndpoint 设置ACM的服务端点
+// WithEndpoint sets the ACM server endpoint.
 func WithEndpoint(endpoint string) Option {
 	return func(o *options) { o.endpoint = endpoint }
 }
 
-// WithRegionId 设置ACM&KMS的regionId
+// WithRegionId sets the regionId of ACM and KMS.
 func WithRegionId(regionId string) Option {
 	return func(o *options) { o.regionId = regionId }
 }
 
-// WithAccessKey 设置ACM&KMS的AccessKey
+// WithAccessKey sets the AccessKey of ACM and KMS.
 func WithAccessKey(accessKey string) Option {
 	return func(o *options) { o.accessKey = accessKey }
 }
 
-// WithSecretKey 设置ACM&KMS的SecretKey
+// WithSecretKey sets the SecretKey of ACM and KMS.
 func WithSecretKey(secretKey string) Option {
 	return func(o *options) { o.secretKey = secretKey }
 }
 
-// WithOpenKMS 设置是否是否开启KMS
+// WithOpenKMS sets whether KMS is enabled.
 func WithOpenKMS(openKMS bool) Option {
 	return func(o *options) { o.openKMS = openKMS }
 }
 
-// WithCacheDir 设置service信息的缓存目录
+// WithCacheDir sets the directory caching the service information.
 func WithCacheDir(cacheDir string) Option {
 	return func(o *options) { o.cacheDir = cacheDir }
 }
 
-// WithUsername 设置Nacos服务端的API鉴权Username
+// WithUsername sets the username for the Nacos server API authentication.
 func WithUsername(username string) Option {
 	return func(o *options) { o.username = username }
 }
 
-// WithPassword 设置Nacos服务端的API鉴权Password
+// WithPassword sets the password for the Nacos server API authentication.
 func WithPassword(password string) Option {
 	return func(o *options) { o.password = password }
 }
 
-// WithLogDir 设置日志存储路径
+// WithLogDir sets the log storage path.
 func WithLogDir(logDir string) Option {
 	return func(o *options) { o.logDir = logDir }
 }
 
-// WithLogLevel 设置日志输出级别
+// WithLogLevel sets the log output level.
 func WithLogLevel(logLevel string) Option {
 	return func(o *options) { o.logLevel = logLevel }
 }

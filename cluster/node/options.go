@@ -17,67 +17,195 @@ import (
 )
 
 const (
-	defaultName              = "node"  // 默认节点名称
-	defaultCodec             = "proto" // 默认编解码器名称
-	defaultWeight            = 1       // 默认权重
-	defaultAddr              = ":0"    // 连接器监听地址
-	defaultConnNum           = 5       // 默认连接数
-	defaultCallTimeout       = "3s"    // 默认调用超时时间
-	defaultDialTimeout       = "3s"    // 默认拨号超时时间
-	defaultDialRetryTimes    = 3       // 默认拨号重试次数
-	defaultWriteTimeout      = "0s"    // 默认写入超时时间
-	defaultWriteQueueSize    = 2048    // 默认写入队列大小
-	defaultFaultRecoveryTime = "5s"    // 默认故障恢复时间
+	defaultName                      = "node"  // Default node name
+	defaultCodec                     = "proto" // Default codec name
+	defaultWeight                    = 1       // Default weight
+	defaultAddr                      = ":0"    // Linker listen address
+	defaultTaskQueueSize             = 4096    // Default task queue capacity
+	defaultTaskWriteTimeout          = "0s"    // Default task timeout
+	defaultMessageQueueSize          = 10240   // Default message queue capacity
+	defaultMessageWriteTimeout       = "0s"    // Default write timeout
+	defaultLinkerConnNum             = 5       // Default number of connections
+	defaultLinkerCallTimeout         = "3s"    // Default call timeout
+	defaultLinkerDialTimeout         = "3s"    // Default dial timeout
+	defaultLinkerDialRetryTimes      = 3       // Default dial retry times
+	defaultLinkerFaultRecoveryTime   = "5s"    // Default fault recovery time
+	defaultLinkerCommandQueueSize    = 4096    // Default message queue capacity
+	defaultLinkerCommandWriteTimeout = "0s"    // Default write timeout
 )
 
 const (
-	defaultIDKey                = "etc.cluster.node.id"
-	defaultNameKey              = "etc.cluster.node.name"
-	defaultCodecKey             = "etc.cluster.node.codec"
-	defaultWeightKey            = "etc.cluster.node.weight"
-	defaultMetadataKey          = "etc.cluster.node.metadata"
-	defaultAddrKey              = "etc.cluster.node.addr"
-	defaultExposeKey            = "etc.cluster.node.expose"
-	defaultConnNumKey           = "etc.cluster.node.connNum"
-	defaultCallTimeoutKey       = "etc.cluster.node.callTimeout"
-	defaultDialTimeoutKey       = "etc.cluster.node.dialTimeout"
-	defaultDialRetryTimesKey    = "etc.cluster.node.dialRetryTimes"
-	defaultWriteTimeoutKey      = "etc.cluster.node.writeTimeout"
-	defaultWriteQueueSizeKey    = "etc.cluster.node.writeQueueSize"
-	defaultFaultRecoveryTimeKey = "etc.cluster.node.faultRecoveryTime"
+	defaultIDKey                        = "etc.cluster.node.id"
+	defaultNameKey                      = "etc.cluster.node.name"
+	defaultCodecKey                     = "etc.cluster.node.codec"
+	defaultWeightKey                    = "etc.cluster.node.weight"
+	defaultMetadataKey                  = "etc.cluster.node.metadata"
+	defaultAddrKey                      = "etc.cluster.node.addr"
+	defaultExposeKey                    = "etc.cluster.node.expose"
+	defaultTaskQueueSizeKey             = "etc.cluster.node.taskQueueSize"
+	defaultTaskWriteTimeoutKey          = "etc.cluster.node.taskWriteTimeout"
+	defaultMessageQueueSizeKey          = "etc.cluster.node.messageQueueSize"
+	defaultMessageWriteTimeoutKey       = "etc.cluster.node.messageWriteTimeout"
+	defaultLinkerConnNumKey             = "etc.cluster.node.linker.connNum"
+	defaultLinkerCallTimeoutKey         = "etc.cluster.node.linker.callTimeout"
+	defaultLinkerDialTimeoutKey         = "etc.cluster.node.linker.dialTimeout"
+	defaultLinkerDialRetryTimesKey      = "etc.cluster.node.linker.dialRetryTimes"
+	defaultLinkerFaultRecoveryTimeKey   = "etc.cluster.node.linker.faultRecoveryTime"
+	defaultLinkerCommandQueueSizeKey    = "etc.cluster.node.linker.commandQueueSize"
+	defaultLinkerCommandWriteTimeoutKey = "etc.cluster.node.linker.commandWriteTimeout"
 )
 
-// SchedulingModel 调度模型
-type SchedulingModel string
-
+// Option is a configuration function of a [Node].
 type Option func(o *options)
 
-type options struct {
-	ctx               context.Context       // 上下文
-	id                string                // 实例ID
-	name              string                // 实例名称；相同实例名称的节点，用户只能绑定其中一个
-	codec             encoding.Codec        // 编解码器
-	weight            int                   // 服务器权重
-	locator           locate.Locator        // 用户定位器
-	registry          registry.Registry     // 服务注册器
-	encryptor         crypto.Encryptor      // 消息加密器
-	transporter       transport.Transporter // 消息传输器
-	metadata          map[string]string     // 元数据
-	addr              string                // 内部RPC监听地址
-	expose            bool                  // 内部RPC是否暴露到公网
-	connNum           int                   // 内部RPC拨号连接数
-	callTimeout       time.Duration         // 内部RPC调用超时时间
-	dialTimeout       time.Duration         // 内部RPC拨号超时时间
-	dialRetryTimes    int                   // 内部RPC拨号重试次数
-	writeTimeout      time.Duration         // 内部RPC写入超时时间
-	writeQueueSize    int32                 // 内部RPC写入队列大小
-	faultRecoveryTime time.Duration         // 内部RPC故障恢复时间
+// linkerOptions holds the internal RPC options.
+type linkerOptions struct {
+	connNum             int           // Number of internal RPC dial connections
+	callTimeout         time.Duration // Internal RPC call timeout
+	dialTimeout         time.Duration // Internal RPC dial timeout
+	dialRetryTimes      int           // Internal RPC dial retry times
+	faultRecoveryTime   time.Duration // Internal RPC fault recovery time
+	commandQueueSize    int32         // Message queue capacity
+	commandWriteTimeout time.Duration // Message write timeout
 }
 
+// options holds the node options.
+type options struct {
+	// Startup context.
+	//
+	// It is the parent context of the node lifecycle context and of the internal linker contexts,
+	// and is provided by WithContext. It defaults to context.Background() when it is not specified.
+	ctx context.Context
+
+	// Instance ID.
+	//
+	// It uniquely identifies the running instance, and is used as the ID of the node and mesh
+	// service instances registered to the registry. It can be configured through
+	// etc.cluster.node.id; a UUID is generated when the configuration is empty.
+	id string
+
+	// Instance name.
+	//
+	// It is registered as the alias of the service instances and returned by Node.Name. For nodes
+	// with the same instance name, a user can only bind to one of them. It can be configured
+	// through etc.cluster.node.name, and defaults to "node".
+	name string
+
+	// Codec.
+	//
+	// It marshals and unmarshals the payload of the internal RPC between the node and the
+	// gateways or the other nodes. It can be configured through etc.cluster.node.codec, and
+	// defaults to "proto". The node terminates at startup when it is not injected.
+	codec encoding.Codec
+
+	// Server weight.
+	//
+	// It is written to the registered service instances, and is used as the weight when a route
+	// or event message is dispatched to pick the target node. It must be positive, can be
+	// configured through etc.cluster.node.weight, and defaults to 1.
+	weight int
+
+	// User locator.
+	//
+	// It locates the gateway or the stateful node the user resides on, so that the node can bind,
+	// unbind and push messages to the user. The node terminates at startup when it is not
+	// injected.
+	locator locate.Locator
+
+	// Service registry.
+	//
+	// It registers the node and mesh service instances, discovers the gateways and the other
+	// nodes in the same cluster, and serves as the default service discovery of the transporter.
+	// The node terminates at startup when it is not injected.
+	registry registry.Registry
+
+	// Message encryptor.
+	//
+	// It decrypts the payload of the requests delivered by the gateways, and encrypts the payload
+	// of the messages sent to the gateways or the other nodes through the internal linkers. It is
+	// optional; the payloads are passed through as they are when it is nil.
+	encryptor crypto.Encryptor
+
+	// Message transporter.
+	//
+	// It creates the internal transport server and clients of the mesh, which expose and call the
+	// services provided by the instances. It is optional; the node provides no mesh services and
+	// registers no mesh service instance when it is nil.
+	transporter transport.Transporter
+
+	// Metadata.
+	//
+	// It is attached to the registered node and mesh service instances, and is visible to the
+	// instances that discover them. It can be configured through etc.cluster.node.metadata.
+	metadata map[string]string
+
+	// Custom context generator.
+	//
+	// It generates the context of the requests and events received from the gateways and of the
+	// actor requests. A background context is used when it is not specified.
+	ctxFunc func() context.Context
+
+	// Internal RPC listen address.
+	//
+	// The linker server listens on it to receive the requests and events delivered by the
+	// gateways. A random available port is assigned when the port is empty or 0. It can be
+	// configured through etc.cluster.node.addr, and defaults to ":0".
+	addr string
+
+	// Whether the internal RPC is exposed to the public network.
+	//
+	// When the listen host is empty or a wildcard address, it determines whether the address
+	// registered to the registry is resolved to the public IP or to the private IP. It can be
+	// configured through etc.cluster.node.expose, and is disabled by default.
+	expose bool
+
+	// Task queue capacity.
+	//
+	// It is the capacity of the node task queue, which serially executes the tasks committed
+	// through Proxy.Invoke and Proxy.AfterInvoke. It can be configured through
+	// etc.cluster.node.taskQueueSize, and defaults to 4096.
+	taskQueueSize int32
+
+	// Task write timeout.
+	//
+	// It bounds how long a non-blocking write waits when the task queue is full, and reports a
+	// write timeout error once it expires. A value of 0 or less disables the bound and makes the
+	// write block until it succeeds. It can be configured through
+	// etc.cluster.node.taskWriteTimeout, and defaults to 0s.
+	taskWriteTimeout time.Duration
+
+	// Message queue capacity.
+	//
+	// It is the capacity of the queues that buffer the requests handled by the router and the
+	// events handled by the trigger before they are processed. It can be configured through
+	// etc.cluster.node.messageQueueSize, and defaults to 10240.
+	messageQueueSize int32
+
+	// Message write timeout.
+	//
+	// It bounds how long a non-blocking write waits when the message queue is full, and reports a
+	// write timeout error once it expires. A value of 0 or less disables the bound and makes the
+	// write block until it succeeds. It can be configured through
+	// etc.cluster.node.messageWriteTimeout, and defaults to 0s.
+	messageWriteTimeout time.Duration
+
+	// Internal RPC options.
+	//
+	// It holds the options of the internal RPC between the node and the gateways or the other
+	// nodes, such as the connection number, the timeouts and the queue sizes, and is shared by the
+	// gate linker and the node linker created by the proxy.
+	linker *linkerOptions
+}
+
+// defaultOptions creates the default node options.
+//
+// It reads each parameter from the configuration environment and fills in the defaults, generating
+// default implementations for the unspecified parameters.
 func defaultOptions() *options {
 	opts := &options{}
 	opts.ctx = context.Background()
 	opts.expose = etc.Get(defaultExposeKey).Bool()
+	opts.linker = &linkerOptions{}
 	opts.metadata = make(map[string]string)
 
 	if id := etc.Get(defaultIDKey).String(); id != "" {
@@ -110,46 +238,70 @@ func defaultOptions() *options {
 		opts.addr = defaultAddr
 	}
 
-	if connNum := etc.Get(defaultConnNumKey, defaultConnNum).Int(); connNum > 0 {
-		opts.connNum = connNum
+	if taskQueueSize := etc.Get(defaultTaskQueueSizeKey, defaultTaskQueueSize).Int32(); taskQueueSize > 0 {
+		opts.taskQueueSize = taskQueueSize
 	} else {
-		opts.connNum = defaultConnNum
+		opts.taskQueueSize = defaultTaskQueueSize
 	}
 
-	if callTimeout := etc.Get(defaultCallTimeoutKey, defaultCallTimeout).Duration(); callTimeout >= 0 {
-		opts.callTimeout = callTimeout
+	if taskWriteTimeout := etc.Get(defaultTaskWriteTimeoutKey, defaultTaskWriteTimeout).Duration(); taskWriteTimeout >= 0 {
+		opts.taskWriteTimeout = taskWriteTimeout
 	} else {
-		opts.callTimeout = xconv.Duration(defaultCallTimeout)
+		opts.taskWriteTimeout = xconv.Duration(defaultTaskWriteTimeout)
 	}
 
-	if dialTimeout := etc.Get(defaultDialTimeoutKey, defaultDialTimeout).Duration(); dialTimeout >= 0 {
-		opts.dialTimeout = dialTimeout
+	if messageQueueSize := etc.Get(defaultMessageQueueSizeKey, defaultMessageQueueSize).Int32(); messageQueueSize > 0 {
+		opts.messageQueueSize = messageQueueSize
 	} else {
-		opts.dialTimeout = xconv.Duration(defaultDialTimeout)
+		opts.messageQueueSize = defaultMessageQueueSize
 	}
 
-	if dialRetryTimes := etc.Get(defaultDialRetryTimesKey, defaultDialRetryTimes).Int(); dialRetryTimes >= 0 {
-		opts.dialRetryTimes = dialRetryTimes
+	if messageWriteTimeout := etc.Get(defaultMessageWriteTimeoutKey, defaultMessageWriteTimeout).Duration(); messageWriteTimeout >= 0 {
+		opts.messageWriteTimeout = messageWriteTimeout
 	} else {
-		opts.dialRetryTimes = defaultDialRetryTimes
+		opts.messageWriteTimeout = xconv.Duration(defaultMessageWriteTimeout)
 	}
 
-	if writeTimeout := etc.Get(defaultWriteTimeoutKey, defaultWriteTimeout).Duration(); writeTimeout >= 0 {
-		opts.writeTimeout = writeTimeout
+	if connNum := etc.Get(defaultLinkerConnNumKey, defaultLinkerConnNum).Int(); connNum > 0 {
+		opts.linker.connNum = connNum
 	} else {
-		opts.writeTimeout = xconv.Duration(defaultWriteTimeout)
+		opts.linker.connNum = defaultLinkerConnNum
 	}
 
-	if writeQueueSize := etc.Get(defaultWriteQueueSizeKey, defaultWriteQueueSize).Int32(); writeQueueSize > 0 {
-		opts.writeQueueSize = writeQueueSize
+	if callTimeout := etc.Get(defaultLinkerCallTimeoutKey, defaultLinkerCallTimeout).Duration(); callTimeout >= 0 {
+		opts.linker.callTimeout = callTimeout
 	} else {
-		opts.writeQueueSize = defaultWriteQueueSize
+		opts.linker.callTimeout = xconv.Duration(defaultLinkerCallTimeout)
 	}
 
-	if faultRecoveryTime := etc.Get(defaultFaultRecoveryTimeKey, defaultFaultRecoveryTime).Duration(); faultRecoveryTime >= 0 {
-		opts.faultRecoveryTime = faultRecoveryTime
+	if dialTimeout := etc.Get(defaultLinkerDialTimeoutKey, defaultLinkerDialTimeout).Duration(); dialTimeout >= 0 {
+		opts.linker.dialTimeout = dialTimeout
 	} else {
-		opts.faultRecoveryTime = xconv.Duration(defaultFaultRecoveryTime)
+		opts.linker.dialTimeout = xconv.Duration(defaultLinkerDialTimeout)
+	}
+
+	if dialRetryTimes := etc.Get(defaultLinkerDialRetryTimesKey, defaultLinkerDialRetryTimes).Int(); dialRetryTimes >= 0 {
+		opts.linker.dialRetryTimes = dialRetryTimes
+	} else {
+		opts.linker.dialRetryTimes = defaultLinkerDialRetryTimes
+	}
+
+	if faultRecoveryTime := etc.Get(defaultLinkerFaultRecoveryTimeKey, defaultLinkerFaultRecoveryTime).Duration(); faultRecoveryTime >= 0 {
+		opts.linker.faultRecoveryTime = faultRecoveryTime
+	} else {
+		opts.linker.faultRecoveryTime = xconv.Duration(defaultLinkerFaultRecoveryTime)
+	}
+
+	if commandQueueSize := etc.Get(defaultLinkerCommandQueueSizeKey, defaultLinkerCommandQueueSize).Int32(); commandQueueSize > 0 {
+		opts.linker.commandQueueSize = commandQueueSize
+	} else {
+		opts.linker.commandQueueSize = defaultLinkerCommandQueueSize
+	}
+
+	if commandWriteTimeout := etc.Get(defaultLinkerCommandWriteTimeoutKey, defaultLinkerCommandWriteTimeout).Duration(); commandWriteTimeout >= 0 {
+		opts.linker.commandWriteTimeout = commandWriteTimeout
+	} else {
+		opts.linker.commandWriteTimeout = xconv.Duration(defaultLinkerCommandWriteTimeout)
 	}
 
 	if err := etc.Get(defaultMetadataKey).Scan(&opts.metadata); err != nil {
@@ -159,7 +311,7 @@ func defaultOptions() *options {
 	return opts
 }
 
-// WithID 设置实例ID
+// WithID sets the instance ID.
 func WithID(id string) Option {
 	return func(o *options) {
 		if id != "" {
@@ -170,7 +322,7 @@ func WithID(id string) Option {
 	}
 }
 
-// WithName 设置实例名称
+// WithName sets the instance name.
 func WithName(name string) Option {
 	return func(o *options) {
 		if name != "" {
@@ -181,7 +333,7 @@ func WithName(name string) Option {
 	}
 }
 
-// WithAddr 设置监听地址
+// WithAddr sets the listen address.
 func WithAddr(addr string) Option {
 	return func(o *options) {
 		if addr != "" {
@@ -192,12 +344,12 @@ func WithAddr(addr string) Option {
 	}
 }
 
-// WithExpose 设置是否将内部通信地址暴露到公网
+// WithExpose sets whether the internal communication address is exposed to the public network.
 func WithExpose(expose bool) Option {
 	return func(o *options) { o.expose = expose }
 }
 
-// WithCodec 设置编解码器
+// WithCodec sets the codec.
 func WithCodec(codec encoding.Codec) Option {
 	return func(o *options) {
 		if codec != nil {
@@ -208,18 +360,18 @@ func WithCodec(codec encoding.Codec) Option {
 	}
 }
 
-// WithWeight 设置权重
+// WithWeight sets the weight.
 func WithWeight(weight int) Option {
 	return func(o *options) {
 		if weight > 0 {
 			o.weight = weight
 		} else {
-			log.Warnf("the specified weight is less than zero and will be ignored")
+			log.Warnf("the specified weight is not positive and will be ignored")
 		}
 	}
 }
 
-// WithContext 设置上下文
+// WithContext sets the startup context.
 func WithContext(ctx context.Context) Option {
 	return func(o *options) {
 		if ctx != nil {
@@ -230,7 +382,7 @@ func WithContext(ctx context.Context) Option {
 	}
 }
 
-// WithLocator 设置定位器
+// WithLocator sets the user locator.
 func WithLocator(locator locate.Locator) Option {
 	return func(o *options) {
 		if locator != nil {
@@ -241,7 +393,7 @@ func WithLocator(locator locate.Locator) Option {
 	}
 }
 
-// WithRegistry 设置服务注册器
+// WithRegistry sets the service registry.
 func WithRegistry(r registry.Registry) Option {
 	return func(o *options) {
 		if r != nil {
@@ -252,7 +404,7 @@ func WithRegistry(r registry.Registry) Option {
 	}
 }
 
-// WithEncryptor 设置消息加密器
+// WithEncryptor sets the message encryptor.
 func WithEncryptor(encryptor crypto.Encryptor) Option {
 	return func(o *options) {
 		if encryptor != nil {
@@ -263,7 +415,7 @@ func WithEncryptor(encryptor crypto.Encryptor) Option {
 	}
 }
 
-// WithTransporter 设置消息传输器
+// WithTransporter sets the message transporter.
 func WithTransporter(transporter transport.Transporter) Option {
 	return func(o *options) {
 		if transporter != nil {
@@ -274,7 +426,18 @@ func WithTransporter(transporter transport.Transporter) Option {
 	}
 }
 
-// WithMetadata 设置元数据
+// WithContextFunc sets the custom context generator.
+func WithContextFunc(ctxFunc func() context.Context) Option {
+	return func(o *options) {
+		if ctxFunc != nil {
+			o.ctxFunc = ctxFunc
+		} else {
+			log.Warnf("the specified ctxFunc is nil and will be ignored")
+		}
+	}
+}
+
+// WithMetadata sets the metadata.
 func WithMetadata(metadata map[string]string) Option {
 	return func(o *options) {
 		if len(metadata) != 0 {
@@ -289,79 +452,123 @@ func WithMetadata(metadata map[string]string) Option {
 	}
 }
 
-// WithConnNum 设置连接数
-func WithConnNum(connNum int) Option {
+// WithTaskQueueSize sets the task queue capacity.
+func WithTaskQueueSize(taskQueueSize int32) Option {
+	return func(o *options) {
+		if taskQueueSize > 0 {
+			o.taskQueueSize = taskQueueSize
+		} else {
+			log.Warnf("the specified taskQueueSize is less than zero and will be ignored")
+		}
+	}
+}
+
+// WithTaskWriteTimeout sets the task timeout.
+func WithTaskWriteTimeout(taskWriteTimeout time.Duration) Option {
+	return func(o *options) {
+		if taskWriteTimeout >= 0 {
+			o.taskWriteTimeout = taskWriteTimeout
+		} else {
+			log.Warnf("the specified taskWriteTimeout is less than zero and will be ignored")
+		}
+	}
+}
+
+// WithMessageWriteTimeout sets the message write timeout.
+func WithMessageWriteTimeout(messageWriteTimeout time.Duration) Option {
+	return func(o *options) {
+		if messageWriteTimeout >= 0 {
+			o.messageWriteTimeout = messageWriteTimeout
+		} else {
+			log.Warnf("the specified messageWriteTimeout is less than zero and will be ignored")
+		}
+	}
+}
+
+// WithMessageQueueSize sets the message queue capacity.
+func WithMessageQueueSize(messageQueueSize int32) Option {
+	return func(o *options) {
+		if messageQueueSize > 0 {
+			o.messageQueueSize = messageQueueSize
+		} else {
+			log.Warnf("the specified messageQueueSize is less than zero and will be ignored")
+		}
+	}
+}
+
+// WithLinkerConnNum sets the number of connections.
+func WithLinkerConnNum(connNum int) Option {
 	return func(o *options) {
 		if connNum > 0 {
-			o.connNum = connNum
+			o.linker.connNum = connNum
 		} else {
-			log.Warnf("the specified connNum is less than zero and will be ignored")
+			log.Warnf("the specified linker's connNum is less than zero and will be ignored")
 		}
 	}
 }
 
-// WithCallTimeout 设置RPC调用超时时间
-func WithCallTimeout(callTimeout time.Duration) Option {
+// WithLinkerCallTimeout sets the RPC call timeout.
+func WithLinkerCallTimeout(callTimeout time.Duration) Option {
 	return func(o *options) {
 		if callTimeout >= 0 {
-			o.callTimeout = callTimeout
+			o.linker.callTimeout = callTimeout
 		} else {
-			log.Warnf("the specified callTimeout is less than zero and will be ignored")
+			log.Warnf("the specified linker's callTimeout is less than zero and will be ignored")
 		}
 	}
 }
 
-// WithDialTimeout 设置拨号超时时间
-func WithDialTimeout(dialTimeout time.Duration) Option {
+// WithLinkerDialTimeout sets the internal RPC dial timeout.
+func WithLinkerDialTimeout(dialTimeout time.Duration) Option {
 	return func(o *options) {
 		if dialTimeout >= 0 {
-			o.dialTimeout = dialTimeout
+			o.linker.dialTimeout = dialTimeout
 		} else {
-			log.Warnf("the specified dialTimeout is less than zero and will be ignored")
+			log.Warnf("the specified linker's dialTimeout is less than zero and will be ignored")
 		}
 	}
 }
 
-// WithDialRetryTimes 设置拨号重试次数
-func WithDialRetryTimes(dialRetryTimes int) Option {
+// WithLinkerDialRetryTimes sets the internal RPC dial retry times.
+func WithLinkerDialRetryTimes(dialRetryTimes int) Option {
 	return func(o *options) {
 		if dialRetryTimes >= 0 {
-			o.dialRetryTimes = dialRetryTimes
+			o.linker.dialRetryTimes = dialRetryTimes
 		} else {
-			log.Warnf("the specified dialRetryTimes is less than zero and will be ignored")
+			log.Warnf("the specified linker's dialRetryTimes is less than zero and will be ignored")
 		}
 	}
 }
 
-// WithWriteTimeout 设置写入超时时间
-func WithWriteTimeout(writeTimeout time.Duration) Option {
-	return func(o *options) {
-		if writeTimeout >= 0 {
-			o.writeTimeout = writeTimeout
-		} else {
-			log.Warnf("the specified writeTimeout is less than zero and will be ignored")
-		}
-	}
-}
-
-// WithWriteQueueSize 设置写入队列大小
-func WithWriteQueueSize(writeQueueSize int32) Option {
-	return func(o *options) {
-		if writeQueueSize > 0 {
-			o.writeQueueSize = writeQueueSize
-		} else {
-			log.Warnf("the specified writeQueueSize is less than zero and will be ignored")
-		}
-	}
-}
-
-// WithFaultRecoveryTime 设置故障恢复时间
-func WithFaultRecoveryTime(faultRecoveryTime time.Duration) Option {
+// WithLinkerFaultRecoveryTime sets the internal RPC fault recovery time.
+func WithLinkerFaultRecoveryTime(faultRecoveryTime time.Duration) Option {
 	return func(o *options) {
 		if faultRecoveryTime >= 0 {
-			o.faultRecoveryTime = faultRecoveryTime
+			o.linker.faultRecoveryTime = faultRecoveryTime
 		} else {
-			log.Warnf("the specified faultRecoveryTime is less than zero and will be ignored")
+			log.Warnf("the specified linker's faultRecoveryTime is less than zero and will be ignored")
+		}
+	}
+}
+
+// WithLinkerCommandQueueSize sets the message queue capacity.
+func WithLinkerCommandQueueSize(commandQueueSize int32) Option {
+	return func(o *options) {
+		if commandQueueSize > 0 {
+			o.linker.commandQueueSize = commandQueueSize
+		} else {
+			log.Warnf("the specified linker's messageQueueSize is less than zero and will be ignored")
+		}
+	}
+}
+
+// WithLinkerCommandWriteTimeout sets the write timeout.
+func WithLinkerCommandWriteTimeout(commandWriteTimeout time.Duration) Option {
+	return func(o *options) {
+		if commandWriteTimeout >= 0 {
+			o.linker.commandWriteTimeout = commandWriteTimeout
+		} else {
+			log.Warnf("the specified linker's commandWriteTimeout is less than zero and will be ignored")
 		}
 	}
 }

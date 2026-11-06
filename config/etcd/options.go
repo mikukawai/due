@@ -1,10 +1,3 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/9/13 12:32 上午
- * @Desc: TODO
- */
-
 package etcd
 
 import (
@@ -20,6 +13,8 @@ const (
 	defaultDialTimeout = "5s"
 	defaultPath        = "/config"
 	defaultMode        = config.ReadOnly
+	defaultTimeout     = "3s"
+	defaultRetryTimes  = 3
 )
 
 const (
@@ -29,38 +24,45 @@ const (
 	defaultModeKey        = "etc.config.etcd.mode"
 	defaultUsernameKey    = "etc.config.etcd.username"
 	defaultPasswordKey    = "etc.config.etcd.password"
+	defaultTimeoutKey     = "etc.config.etcd.timeout"
 )
 
+// Option is a function that configures the [options].
 type Option func(o *options)
 
+// options holds the configuration options of a [Source].
 type options struct {
-	// 客户端连接地址
-	// 内建客户端配置，默认为[]string{"localhost:2379"}
+	// addrs is the client connection address.
+	// It configures the built-in client and defaults to []string{"127.0.0.1:2379"}.
 	addrs []string
 
-	// 客户端拨号超时时间
-	// 内建客户端配置，默认为5秒
+	// dialTimeout is the dial timeout of the client.
+	// It configures the built-in client and defaults to 5 seconds.
 	dialTimeout time.Duration
 
-	// 外部客户端
-	// 外部客户端配置，存在外部客户端时，优先使用外部客户端，默认为nil
+	// client is the external client.
+	// When it is provided, it takes precedence over the built-in client. It defaults to nil.
 	client *clientv3.Client
 
-	// 路径
-	// 默认为 /config
+	// path is the namespace path and defaults to /config.
 	path string
 
-	// 读写模式
-	// 支持read-only、write-only和read-write三种模式，默认为read-only模式
+	// mode is the read-write mode.
+	// It supports the read-only, write-only and read-write modes and defaults to read-only.
 	mode config.Mode
 
-	// 用户名
+	// username is the username.
 	username string
 
-	// 密码
+	// password is the password.
 	password string
+
+	// timeout is the context timeout and defaults to 3 seconds.
+	timeout time.Duration
 }
 
+// defaultOptions creates the default options, reading each parameter from the
+// configuration environment and filling in its default value.
 func defaultOptions() *options {
 	return &options{
 		addrs:       etc.Get(defaultAddrsKey, []string{defaultAddr}).Strings(),
@@ -69,40 +71,46 @@ func defaultOptions() *options {
 		mode:        config.Mode(etc.Get(defaultModeKey, defaultMode).String()),
 		username:    etc.Get(defaultUsernameKey).String(),
 		password:    etc.Get(defaultPasswordKey).String(),
+		timeout:     etc.Get(defaultTimeoutKey, defaultTimeout).Duration(),
 	}
 }
 
-// WithAddrs 设置客户端连接地址
+// WithAddrs sets the client connection addresses.
 func WithAddrs(addrs ...string) Option {
 	return func(o *options) { o.addrs = addrs }
 }
 
-// WithDialTimeout 设置客户端拨号超时时间
+// WithDialTimeout sets the dial timeout of the client.
 func WithDialTimeout(dialTimeout time.Duration) Option {
 	return func(o *options) { o.dialTimeout = dialTimeout }
 }
 
-// WithClient 设置外部客户端
+// WithClient sets the external client.
 func WithClient(client *clientv3.Client) Option {
 	return func(o *options) { o.client = client }
 }
 
-// WithPath 设置命名空间
+// WithPath sets the namespace.
 func WithPath(path string) Option {
 	return func(o *options) { o.path = path }
 }
 
-// WithMode 设置读写模式
+// WithMode sets the read-write mode.
 func WithMode(mode config.Mode) Option {
 	return func(o *options) { o.mode = mode }
 }
 
-// WithUsername 设置用户名
+// WithUsername sets the username.
 func WithUsername(username string) Option {
 	return func(o *options) { o.username = username }
 }
 
-// WithPassword 设置密码
+// WithPassword sets the password.
 func WithPassword(password string) Option {
 	return func(o *options) { o.password = password }
+}
+
+// WithTimeout sets the context timeout.
+func WithTimeout(timeout time.Duration) Option {
+	return func(o *options) { o.timeout = timeout }
 }

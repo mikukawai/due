@@ -1,13 +1,14 @@
 package node
 
 import (
+	"context"
 	"sync"
 
-	"github.com/dobyte/due/v2/internal/transporter/internal/client"
+	"github.com/dobyte/due/v2/internal/transporter/internal/drpc"
 	"golang.org/x/sync/singleflight"
 )
 
-type ClientOptions = client.Options
+type ClientOptions = drpc.ClientOptions
 
 type Builder struct {
 	sfg     singleflight.Group
@@ -21,7 +22,10 @@ func NewBuilder(opts *ClientOptions) *Builder {
 	}
 }
 
-// Build 构建客户端
+// Build returns a client for addr, reusing a cached client when one already exists.
+//
+// Dialing is bounded by the dial timeout so that an unreachable endpoint does not trigger
+// indefinite retries.
 func (b *Builder) Build(addr string) (*Client, error) {
 	if cli, ok := b.clients.Load(addr); ok {
 		return cli.(*Client), nil
@@ -32,9 +36,17 @@ func (b *Builder) Build(addr string) (*Client, error) {
 			return cli.(*Client), nil
 		}
 
-		c := client.NewClient(addr, b.opts)
+		c, err := drpc.NewClient(addr, b.opts)
+		if err != nil {
+			return nil, err
+		}
 
-		if err := c.Establish(); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), b.opts.DialTimeout)
+		defer cancel()
+
+		if err = c.Establish(ctx); err != nil {
+			_ = c.Close()
+
 			return nil, err
 		}
 

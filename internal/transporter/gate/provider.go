@@ -4,36 +4,36 @@ import (
 	"context"
 
 	"github.com/dobyte/due/v2/cluster"
-	"github.com/dobyte/due/v2/session"
+	"github.com/dobyte/due/v2/core/buffer"
 )
 
 type Provider interface {
-	// Bind 绑定用户与网关间的关系
+	// Bind binds the relationship between the user and the gate.
 	Bind(ctx context.Context, cid, uid int64) error
-	// Unbind 解绑用户与网关间的关系
+	// Unbind unbinds the relationship between the user and the gate.
 	Unbind(ctx context.Context, uid int64) error
-	// GetIP 获取客户端IP地址
-	GetIP(ctx context.Context, kind session.Kind, target int64) (ip string, err error)
-	// IsOnline 检测是否在线
-	IsOnline(ctx context.Context, kind session.Kind, target int64) (isOnline bool, err error)
-	// Stat 统计会话总数
-	Stat(ctx context.Context, kind session.Kind) (total int64, err error)
-	// Disconnect 断开连接
-	Disconnect(ctx context.Context, kind session.Kind, target int64, force bool) error
-	// Push 发送消息
-	Push(ctx context.Context, kind session.Kind, target int64, disconnect bool, message []byte) error
-	// Multicast 推送组播消息
-	Multicast(ctx context.Context, kind session.Kind, targets []int64, disconnect bool, message []byte) (total int64, err error)
-	// Broadcast 推送广播消息
-	Broadcast(ctx context.Context, kind session.Kind, disconnect bool, message []byte) (total int64, err error)
-	// Publish 发布频道消息
-	Publish(ctx context.Context, channel string, disconnect bool, message []byte) (total int64, err error)
-	// Subscribe 订阅频道
-	Subscribe(ctx context.Context, kind session.Kind, targets []int64, channel string) error
-	// Unsubscribe 取消订阅频道
-	Unsubscribe(ctx context.Context, kind session.Kind, targets []int64, channel string) error
-	// GetState 获取状态
+	// GetIP returns the client IP address.
+	GetIP(ctx context.Context, kind cluster.Session, target int64) (ip string, err error)
+	// IsOnline reports whether the target is online.
+	IsOnline(ctx context.Context, kind cluster.Session, target int64) (isOnline bool, err error)
+	// Stat returns the total number of sessions.
+	Stat(ctx context.Context, kind cluster.Session) (total int64, err error)
+	// Disconnect disconnects the target session.
+	Disconnect(ctx context.Context, kind cluster.Session, target int64, force bool) error
+	// Push sends a message.
+	Push(ctx context.Context, kind cluster.Session, target int64, disconnect bool, buf buffer.Buffer) error
+	// Multicast pushes a multicast message.
+	Multicast(ctx context.Context, kind cluster.Session, targets []int64, disconnect bool, buf buffer.Buffer) (total int64, err error)
+	// Broadcast pushes a broadcast message.
+	Broadcast(ctx context.Context, kind cluster.Session, disconnect bool, buf buffer.Buffer) (total int64, err error)
+	// Publish publishes a channel message.
+	Publish(ctx context.Context, channel string, disconnect bool, buf buffer.Buffer) (total int64, err error)
+	// Subscribe subscribes to channels.
+	Subscribe(ctx context.Context, kind cluster.Session, targets []int64, channel string) error
+	// Unsubscribe unsubscribes from channels.
+	Unsubscribe(ctx context.Context, kind cluster.Session, targets []int64, channel string) error
+	// GetState returns the state.
 	GetState() (cluster.State, error)
-	// SetState 设置状态
+	// SetState sets the state.
 	SetState(state cluster.State) error
 }

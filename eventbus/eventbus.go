@@ -16,17 +16,20 @@ type (
 )
 
 type Eventbus interface {
-	// Close 关闭事件总线
+	// Close closes the eventbus.
 	Close() error
-	// Publish 发布事件
+	// Publish publishes an event.
 	Publish(ctx context.Context, topic string, message any) error
-	// Subscribe 订阅事件
-	Subscribe(ctx context.Context, topic string, handler EventHandler) error
-	// Unsubscribe 取消订阅
-	Unsubscribe(ctx context.Context, topic string, handler EventHandler) error
+	// Subscribe subscribes to an event.
+	Subscribe(ctx context.Context, topic string, handler EventHandler, balance ...bool) (Subscription, error)
 }
 
-// SetEventbus 设置事件总线
+type Subscription interface {
+	// Unsubscribe cancels the subscription.
+	Unsubscribe(ctx context.Context) error
+}
+
+// SetEventbus sets the eventbus.
 func SetEventbus(eb Eventbus) {
 	if eb == nil {
 		log.Warn("cannot set a nil eventbus")
@@ -42,12 +45,12 @@ func SetEventbus(eb Eventbus) {
 	globalEventbus = eb
 }
 
-// GetEventbus 获取事件总线
+// GetEventbus returns the eventbus.
 func GetEventbus() Eventbus {
 	return globalEventbus
 }
 
-// Publish 发布事件
+// Publish publishes an event.
 func Publish(ctx context.Context, topic string, message any) error {
 	if globalEventbus == nil {
 		return errors.ErrMissingEventbusInstance
@@ -56,25 +59,16 @@ func Publish(ctx context.Context, topic string, message any) error {
 	return globalEventbus.Publish(ctx, topic, message)
 }
 
-// Subscribe 订阅事件
-func Subscribe(ctx context.Context, topic string, handler EventHandler) error {
+// Subscribe subscribes to an event.
+func Subscribe(ctx context.Context, topic string, handler EventHandler, balance ...bool) (Subscription, error) {
 	if globalEventbus == nil {
-		return errors.ErrMissingEventbusInstance
+		return nil, errors.ErrMissingEventbusInstance
 	}
 
-	return globalEventbus.Subscribe(ctx, topic, handler)
+	return globalEventbus.Subscribe(ctx, topic, handler, balance...)
 }
 
-// Unsubscribe 取消订阅
-func Unsubscribe(ctx context.Context, topic string, handler EventHandler) error {
-	if globalEventbus == nil {
-		return errors.ErrMissingEventbusInstance
-	}
-
-	return globalEventbus.Unsubscribe(ctx, topic, handler)
-}
-
-// Close 关闭事件总线
+// Close closes the eventbus.
 func Close() error {
 	if globalEventbus == nil {
 		return nil

@@ -28,15 +28,19 @@ func NewSigner(opts ...SignerOption) *Signer {
 	return s
 }
 
-// Name 名称
+// Name returns the name of the signer.
 func (s *Signer) Name() string {
 	return Name
 }
 
-// Sign 签名
+// Sign signs data with the ECDSA private key.
 func (s *Signer) Sign(data []byte) ([]byte, error) {
 	if s.err != nil {
 		return nil, s.err
+	}
+
+	if s.privateKey == nil {
+		return nil, errors.New("signer: private key is not set")
 	}
 
 	hashed := s.opts.hash.Sum(data)
@@ -66,11 +70,17 @@ func (s *Signer) Sign(data []byte) ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-// Verify 验签
+// Verify verifies the signature of data with the ECDSA public key.
 func (s *Signer) Verify(data []byte, signature []byte) (bool, error) {
-	delimiter := []byte(s.opts.delimiter)
-	segments := bytes.Split(signature, delimiter)
+	if s.err != nil {
+		return false, s.err
+	}
 
+	if s.publicKey == nil {
+		return false, errors.New("signer: public key is not set")
+	}
+
+	segments := bytes.Split(signature, []byte(s.opts.delimiter))
 	if len(segments) != 2 {
 		return false, errors.ErrInvalidSignature
 	}
@@ -86,16 +96,23 @@ func (s *Signer) Verify(data []byte, signature []byte) (bool, error) {
 		return false, err
 	}
 
-	hashed := s.opts.hash.Sum(data)
-
-	return ecdsa.Verify(s.publicKey, hashed[:], rs, ss), nil
+	return ecdsa.Verify(s.publicKey, s.opts.hash.Sum(data), rs, ss), nil
 }
 
 func (s *Signer) init() {
-	s.publicKey, s.err = parseECDSAPublicKey(s.opts.publicKey)
-	if s.err != nil {
+	if s.opts.delimiter == "" {
+		s.err = errors.New("signer: delimiter must not be empty")
 		return
 	}
 
-	s.privateKey, s.err = parseECDSAPrivateKey(s.opts.privateKey)
+	if s.opts.publicKey != "" {
+		s.publicKey, s.err = parseECDSAPublicKey(s.opts.publicKey)
+		if s.err != nil {
+			return
+		}
+	}
+
+	if s.opts.privateKey != "" {
+		s.privateKey, s.err = parseECDSAPrivateKey(s.opts.privateKey)
+	}
 }

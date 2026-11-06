@@ -2,51 +2,84 @@ package node
 
 import (
 	"context"
+	"sync"
+
 	"github.com/dobyte/due/v2/cluster"
+	"github.com/dobyte/due/v2/core/queue"
 	"github.com/dobyte/due/v2/log"
-	"github.com/dobyte/due/v2/utils/xcall"
 )
 
+// EventHandler is an event handler function.
 type EventHandler func(ctx Context)
 
+// Trigger is an event trigger.
 type Trigger struct {
-	node    *Node
-	events  map[cluster.Event]EventHandler
-	evtChan chan *event
+	node   *Node
+	queue  *queue.Queue[*event]
+	events map[cluster.Event]EventHandler
 }
 
+// newTrigger creates a new event trigger for the given node server.
 func newTrigger(node *Node) *Trigger {
 	return &Trigger{
-		node:    node,
-		events:  make(map[cluster.Event]EventHandler, 3),
-		evtChan: make(chan *event, 4096),
+		node:   node,
+		queue:  queue.NewQueue[*event](node.opts.messageQueueSize, node.opts.messageWriteTimeout, &sync.RWMutex{}),
+		events: make(map[cluster.Event]EventHandler, 3),
 	}
 }
 
-func (e *Trigger) trigger(kind cluster.Event, gid string, cid, uid int64) {
-	evt := e.node.evtPool.Get().(*event)
-	evt.ctx = context.Background()
+// trigger triggers an event. It fetches an event object from the pool, fills it in and writes it to
+// the event queue for asynchronous handling. It returns the error reported when the event fails to
+// be enqueued.
+func (t *Trigger) trigger(kind cluster.Event, gid string, cid, uid int64) error {
+	evt := t.node.evtPool.Get().(*event)
 	evt.event = kind
 	evt.gid = gid
 	evt.cid = cid
 	evt.uid = uid
-	e.evtChan <- evt
+
+	if t.node.opts.ctxFunc != nil {
+		evt.ctx = t.node.opts.ctxFunc()
+	} else {
+		evt.ctx = context.Background()
+	}
+
+	if err := t.queue.Write(evt); err != nil {
+		evt.release()
+		return err
+	}
+
+	return nil
 }
 
-func (e *Trigger) receive() <-chan *event {
-	return e.evtChan
+// receive returns the channel from which event messages are received.
+func (t *Trigger) receive() <-chan *event {
+	return t.queue.Read()
 }
 
-func (e *Trigger) close() {
-	close(e.evtChan)
+// close closes the event trigger.
+func (t *Trigger) close() {
+	t.queue.Close()
 }
 
-// 处理事件消息
-func (e *Trigger) handle(evt *event) {
+// clean releases every event object still in the event queue.
+func (t *Trigger) clean() {
+	t.queue.Clean(func(evt *event) { evt.release() })
+}
+
+// handle handles an event message. It looks up the matching event handler and executes it, then
+// recycles the event object once handling is done.
+func (t *Trigger) handle(evt *event) {
+	t.queue.Done(evt == nil)
+
+	if evt == nil {
+		return
+	}
+
 	version := evt.incrVersion()
 
-	if handler, ok := e.events[evt.event]; ok {
-		xcall.Call(func() { handler(evt) })
+	if handler, ok := t.events[evt.event]; ok {
+		safeCallContextHandler(handler, evt)
 
 		evt.compareVersionExecDefer(version)
 	}
@@ -54,12 +87,12 @@ func (e *Trigger) handle(evt *event) {
 	evt.compareVersionRecycle(version)
 }
 
-// AddEventHandler 添加事件处理器
-func (e *Trigger) AddEventHandler(event cluster.Event, handler EventHandler) {
-	if e.node.getState() != cluster.Shut {
+// addEventHandler adds an event handler for the given event type.
+func (t *Trigger) addEventHandler(event cluster.Event, handler EventHandler) {
+	if t.node.getState() != cluster.Shut {
 		log.Warnf("the node server is working, can't add Event handler")
 		return
 	}
 
-	e.events[event] = handler
+	t.events[event] = handler
 }

@@ -1,9 +1,6 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/5/28 12:13 下午
- * @Desc: TODO
- */
+// Author: fuxiao
+// Email: 576101059@qq.com
+// Date: 2022/05/28 12:13 PM
 
 package xnet
 
@@ -14,47 +11,48 @@ import (
 	innernet "github.com/dobyte/due/v2/core/net"
 )
 
-// ExtractIP 提取主机地址
+// ExtractIP extracts the host IP address from addr.
 func ExtractIP(addr net.Addr) (string, error) {
 	return innernet.ExtractIP(addr)
 }
 
-// ExtractPort 提取主机端口
+// ExtractPort extracts the host port from addr.
 func ExtractPort(addr net.Addr) (int, error) {
 	return innernet.ExtractPort(addr)
 }
 
-// InternalIP 获取内网IP地址
+// InternalIP returns the internal (private) IP address.
 func InternalIP() (string, error) {
 	return innernet.InternalIP()
 }
 
-// ExternalIP 获取外网IP地址
+// ExternalIP returns the external IP address.
 func ExternalIP() (string, error) {
 	return innernet.ExternalIP()
 }
 
-// PublicIP 获取公网IP
+// PublicIP returns the public IP address.
 func PublicIP() (string, error) {
 	return innernet.PublicIP()
 }
 
-// PrivateIP 获取私网IP
+// PrivateIP returns the private IP address.
 func PrivateIP() (string, error) {
 	return innernet.PrivateIP()
 }
 
-// FulfillAddr 补全地址
+// FulfillAddr completes addr so that it is a valid, fully qualified address.
 func FulfillAddr(addr string) string {
 	return innernet.FulfillAddr(addr)
 }
 
-// AssignRandPort 分配一个随机端口
+// AssignRandPort allocates a free random port, optionally bound to one of the given IP addresses.
 func AssignRandPort(ip ...string) (int, error) {
 	return innernet.AssignRandPort(ip...)
 }
 
-// IP2Long IP地址转换为长整型
+// IP2Long converts an IPv4 address into its uint32 representation. It returns 0 when ip is not a
+// valid IPv4 address.
 func IP2Long(ip string) uint32 {
 	v := net.ParseIP(ip).To4()
 
@@ -65,7 +63,7 @@ func IP2Long(ip string) uint32 {
 	return binary.BigEndian.Uint32(v)
 }
 
-// Long2IP 长整型转换为字符串地址
+// Long2IP converts a uint32 into its dotted-decimal IPv4 address string.
 func Long2IP(v uint32) string {
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, v)

@@ -12,21 +12,26 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/adaptor"
 )
 
+// Config is the swagger middleware configuration.
 type Config struct {
-	Title            string // 文档标题
-	FilePath         string // 文档路径
-	BasePath         string // 访问路径
-	SwaggerBundleUrl string // swagger-ui-bundle.js地址
-	SwaggerPresetUrl string // swagger-ui-preset.js地址
-	SwaggerStylesUrl string // swagger-ui.css地址
+	Title            string // Document title
+	FilePath         string // Document path
+	BasePath         string // Access path
+	SwaggerBundleUrl string // swagger-ui-bundle.js URL
+	SwaggerPresetUrl string // swagger-ui-standalone-preset.js URL
+	SwaggerStylesUrl string // swagger-ui.css URL
 }
 
 const (
-	defaultSwaggerBundleUrl = "https://unpkg.com/swagger-ui@5.28.1/dist/swagger-ui-bundle.js"
-	defaultSwaggerPresetUrl = "https://unpkg.com/swagger-ui@5.28.1/dist/swagger-ui-standalone-preset.js"
-	defaultSwaggerStylesUrl = "https://unpkg.com/swagger-ui@5.28.1/dist/swagger-ui.css"
+	defaultSwaggerBundleUrl = "https://unpkg.com/swagger-ui@5.28.1/dist/swagger-ui-bundle.js"            // Default swagger-ui-bundle.js URL
+	defaultSwaggerPresetUrl = "https://unpkg.com/swagger-ui@5.28.1/dist/swagger-ui-standalone-preset.js" // Default swagger-ui-standalone-preset.js URL
+	defaultSwaggerStylesUrl = "https://unpkg.com/swagger-ui@5.28.1/dist/swagger-ui.css"                  // Default swagger-ui.css URL
 )
 
+// New creates a swagger middleware.
+//
+// It validates and reads the swagger file and returns nil when the file does not exist or cannot
+// be read.
 func New(cfg Config) fiber.Handler {
 	// Verify Swagger file exists
 	if _, err := os.Stat(cfg.FilePath); os.IsNotExist(err) {
@@ -42,7 +47,7 @@ func New(cfg Config) fiber.Handler {
 	}
 
 	// Generate URL path's for the middleware
-	specURL := path.Join(cfg.BasePath, cfg.FilePath)
+	specURL := path.Join("/", cfg.BasePath, path.Base(cfg.FilePath))
 	swaggerUIPath := path.Join("/", cfg.BasePath)
 
 	// Serve the Swagger spec from memory

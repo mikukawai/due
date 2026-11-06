@@ -3,8 +3,9 @@ package rsa
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"github.com/dobyte/due/v2/errors"
 	"math"
+
+	"github.com/dobyte/due/v2/errors"
 )
 
 type Encryptor struct {
@@ -26,28 +27,28 @@ func NewEncryptor(opts ...EncryptorOption) *Encryptor {
 	return e
 }
 
-// Name 名称
+// Name returns the name of the encryptor.
 func (e *Encryptor) Name() string {
 	return Name
 }
 
-// Encrypt 加密
+// Encrypt encrypts data with the RSA public key.
 func (e *Encryptor) Encrypt(data []byte) ([]byte, error) {
 	if e.err != nil {
 		return nil, e.err
 	}
 
 	var (
-		err       error
-		black     []byte
-		start     int
-		end       int
-		total     = int(math.Ceil(float64(len(data)) / float64(e.opts.blockSize)))
-		plaintext = make([]byte, 0, total*e.publicKey.Size())
-		h         = e.opts.hash.New()
+		err        error
+		block      []byte
+		start      int
+		end        int
+		total      = int(math.Ceil(float64(len(data)) / float64(e.opts.blockSize)))
+		ciphertext = make([]byte, 0, total*e.publicKey.Size())
+		h          = e.opts.hash.New()
 	)
 
-	for i := 0; i < total; i++ {
+	for i := range total {
 		start = i * e.opts.blockSize
 		end = (i + 1) * e.opts.blockSize
 		if end > len(data) {
@@ -55,37 +56,37 @@ func (e *Encryptor) Encrypt(data []byte) ([]byte, error) {
 		}
 
 		switch e.opts.padding {
-		case OAEP:
-			black, err = rsa.EncryptOAEP(h, rand.Reader, e.publicKey, data[start:end], e.opts.label)
+		case NORMAL:
+			block, err = rsa.EncryptPKCS1v15(rand.Reader, e.publicKey, data[start:end])
 		default:
-			black, err = rsa.EncryptPKCS1v15(rand.Reader, e.publicKey, data[start:end])
+			block, err = rsa.EncryptOAEP(h, rand.Reader, e.publicKey, data[start:end], e.opts.label)
 		}
 		if err != nil {
 			return nil, err
 		}
-		plaintext = append(plaintext, black...)
+		ciphertext = append(ciphertext, block...)
 	}
 
-	return plaintext, nil
+	return ciphertext, nil
 }
 
-// Decrypt 解密
+// Decrypt decrypts ciphertext with the RSA private key.
 func (e *Encryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 	if e.err != nil {
 		return nil, e.err
 	}
 
 	var (
-		err   error
-		black []byte
-		start int
-		end   int
-		total = int(math.Ceil(float64(len(ciphertext)) / float64(e.privateKey.Size())))
-		data  = make([]byte, 0, len(ciphertext))
-		h     = e.opts.hash.New()
+		err       error
+		block     []byte
+		start     int
+		end       int
+		total     = int(math.Ceil(float64(len(ciphertext)) / float64(e.privateKey.Size())))
+		plaintext = make([]byte, 0, len(ciphertext))
+		h         = e.opts.hash.New()
 	)
 
-	for i := 0; i < total; i++ {
+	for i := range total {
 		start = i * e.privateKey.Size()
 		end = (i + 1) * e.privateKey.Size()
 		if end > len(ciphertext) {
@@ -93,18 +94,18 @@ func (e *Encryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 		}
 
 		switch e.opts.padding {
-		case OAEP:
-			black, err = rsa.DecryptOAEP(h, rand.Reader, e.privateKey, ciphertext[start:end], e.opts.label)
+		case NORMAL:
+			block, err = rsa.DecryptPKCS1v15(rand.Reader, e.privateKey, ciphertext[start:end])
 		default:
-			black, err = rsa.DecryptPKCS1v15(rand.Reader, e.privateKey, ciphertext[start:end])
+			block, err = rsa.DecryptOAEP(h, rand.Reader, e.privateKey, ciphertext[start:end], e.opts.label)
 		}
 		if err != nil {
 			return nil, err
 		}
-		data = append(data, black...)
+		plaintext = append(plaintext, block...)
 	}
 
-	return data, nil
+	return plaintext, nil
 }
 
 func (e *Encryptor) init() {
@@ -120,10 +121,10 @@ func (e *Encryptor) init() {
 
 	var blockSize int
 	switch e.opts.padding {
-	case OAEP:
-		blockSize = e.publicKey.Size() - 2*e.opts.hash.Size() - 2
-	default:
+	case NORMAL:
 		blockSize = e.publicKey.Size() - 11
+	default:
+		blockSize = e.publicKey.Size() - 2*e.opts.hash.Size() - 2
 	}
 
 	if e.opts.blockSize <= 0 {

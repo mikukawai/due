@@ -1,13 +1,10 @@
 package kcp
 
+// protocol is the protocol name.
 const protocol = "kcp"
 
-const (
-	closeSig   int = iota // 关闭信号
-	dataPacket            // 数据包
-)
+// maxBatchWriteNum is the maximum number of tasks written in a single batch.
+const maxBatchWriteNum = 64
 
-type chWrite struct {
-	typ int
-	msg []byte
-}
+// minWriteQueueSize is the minimum write queue size.
+const minWriteQueueSize = 128

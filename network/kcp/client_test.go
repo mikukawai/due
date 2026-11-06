@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/dobyte/due/network/kcp/v2"
+	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/network"
 	"github.com/dobyte/due/v2/packet"
 	"github.com/dobyte/due/v2/utils/xrand"
+	"github.com/dobyte/due/v2/utils/xtime"
 )
 
 func TestClient_Simple(t *testing.T) {
@@ -26,14 +28,16 @@ func TestClient_Simple(t *testing.T) {
 		log.Info("connection is closed")
 	})
 
-	client.OnReceive(func(conn network.Conn, data []byte) {
-		message, err := packet.UnpackMessage(data)
+	client.OnReceive(func(conn network.Conn, buf buffer.Buffer) {
+		defer buf.Release()
+
+		route, seq, data, err := packet.UnpackMessage(buf)
 		if err != nil {
 			log.Errorf("unpack message failed: %v", err)
 			return
 		}
 
-		log.Infof("receive msg from server, cid: %d, seq: %d, route: %d, msg: %s", conn.ID(), message.Seq, message.Route, string(message.Buffer))
+		log.Infof("receive msg from server, cid: %d, seq: %d, route: %d, msg: %s", conn.ID(), seq, route, string(data.Bytes()))
 	})
 
 	conn, err := client.Dial()
@@ -50,41 +54,41 @@ func TestClient_Simple(t *testing.T) {
 	defer ticker.Stop()
 
 	for {
-		select {
-		case <-ticker.C:
-			msg, err := packet.PackMessage(&packet.Message{
-				Seq:    1,
-				Route:  1,
-				Buffer: []byte("hello server~~"),
-			})
-			if err != nil {
-				log.Errorf("pack message failed: %v", err)
-				continue
-			}
+		t, ok := <-ticker.C
+		if !ok {
+			return
+		}
 
-			if err = conn.Push(msg); err != nil {
-				log.Errorf("push message failed: %v", err)
-				return
-			}
+		buffer := fmt.Appendf([]byte{}, "%s: hello server~~", t.Format(xtime.DateTime))
 
-			counter++
+		msg, err := packet.PackMessage(1, 1, buffer)
+		if err != nil {
+			log.Errorf("pack message failed: %v", err)
+			continue
+		}
 
-			if counter%5 == 0 {
-				conn.Close()
-			}
+		if err = conn.Push(msg); err != nil {
+			log.Errorf("push message failed: %v", err)
+			return
+		}
 
-			if counter >= 200 {
-				return
-			}
+		counter++
+
+		if counter%5 == 0 {
+			conn.Close()
+		}
+
+		if counter >= 200 {
+			return
 		}
 	}
 }
 
 func TestClient_Benchmark(t *testing.T) {
 	samples := []struct {
-		c    int // 并发数
-		n    int // 请求数
-		size int // 数据包大小
+		c    int // Concurrency
+		n    int // Number of requests
+		size int // Packet size
 	}{
 		{
 			c:    50,
@@ -135,7 +139,7 @@ func TestClient_Benchmark(t *testing.T) {
 	}
 }
 
-// 执行压力测试
+// doPressureTest runs a pressure test.
 func doPressureTest(c int, n int, size int) {
 	var (
 		wg        sync.WaitGroup
@@ -145,13 +149,15 @@ func doPressureTest(c int, n int, size int) {
 
 	client := kcp.NewClient(kcp.WithClientHeartbeatInterval(0))
 
-	client.OnReceive(func(conn network.Conn, data []byte) {
+	client.OnReceive(func(conn network.Conn, buf buffer.Buffer) {
+		defer buf.Release()
+
 		atomic.AddInt64(&totalRecv, 1)
 
 		wg.Done()
 	})
 
-	buffer := []byte(xrand.Letters(size))
+	data := []byte(xrand.Letters(size))
 
 	chMsg := make(chan struct{}, n)
 
@@ -167,29 +173,23 @@ func doPressureTest(c int, n int, size int) {
 			defer conn.Close(true)
 
 			for {
-				select {
-				case _, ok := <-chMsg:
-					if !ok {
-						return
-					}
-
-					msg, err := packet.PackMessage(&packet.Message{
-						Seq:    1,
-						Route:  1,
-						Buffer: buffer,
-					})
-					if err != nil {
-						log.Errorf("pack message failed: %v", err)
-						return
-					}
-
-					if err = conn.Push(msg); err != nil {
-						log.Errorf("push message failed: %v", err)
-						return
-					}
-
-					atomic.AddInt64(&totalSent, 1)
+				_, ok := <-chMsg
+				if !ok {
+					return
 				}
+
+				msg, err := packet.PackMessage(1, 1, data)
+				if err != nil {
+					log.Errorf("pack message failed: %v", err)
+					return
+				}
+
+				if err = conn.Push(msg); err != nil {
+					log.Errorf("push message failed: %v", err)
+					return
+				}
+
+				atomic.AddInt64(&totalSent, 1)
 			}
 		}(conn)
 	}
@@ -198,7 +198,7 @@ func doPressureTest(c int, n int, size int) {
 
 	startTime := time.Now().UnixNano()
 
-	for i := 0; i < n; i++ {
+	for range n {
 		chMsg <- struct{}{}
 	}
 

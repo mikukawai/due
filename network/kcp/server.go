@@ -1,31 +1,37 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/7/12 12:43 上午
- * @Desc: TODO
- */
-
 package kcp
 
 import (
+	"net"
+	"sync"
+	"time"
+
+	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/network"
+	"github.com/pires/go-proxyproto"
 	"github.com/xtaci/kcp-go/v5"
 )
 
 type server struct {
-	opts              *serverOptions
-	listener          *kcp.Listener
-	connMgr           *serverConnMgr
-	startHandler      network.StartHandler      // 服务器启动hook函数
-	stopHandler       network.CloseHandler      // 服务器关闭hook函数
-	connectHandler    network.ConnectHandler    // 连接打开hook函数
-	disconnectHandler network.DisconnectHandler // 连接关闭hook函数
-	receiveHandler    network.ReceiveHandler    // 接收消息hook函数
+	opts              *serverOptions            // Options
+	mu                sync.Mutex                // Lock
+	listener          net.Listener              // Listener
+	connMgr           *serverConnMgr            // Connection manager
+	startHandler      network.StartHandler      // Hook invoked when the server starts
+	stopHandler       network.CloseHandler      // Hook invoked when the server stops
+	connectHandler    network.ConnectHandler    // Hook invoked when a connection is opened
+	disconnectHandler network.DisconnectHandler // Hook invoked when a connection is closed
+	heartbeatHandler  network.HeartbeatHandler  // Hook invoked on connection heartbeat
+	receiveHandler    network.ReceiveHandler    // Hook invoked when a message is received
+	handshakeHandler  network.HandshakeHandler  // Hook invoked when a handshake frame is received
 }
 
 var _ network.Server = &server{}
 
+// NewServer returns a new server.
+//
+// The default options are overridden by the given opts, after which the connection manager is
+// initialized.
 func NewServer(opts ...ServerOption) network.Server {
 	o := defaultServerOptions()
 	for _, opt := range opts {
@@ -39,93 +45,204 @@ func NewServer(opts ...ServerOption) network.Server {
 	return s
 }
 
-// Addr 监听地址
+// Addr returns the listen address.
+//
+// Once the server has started it returns the actual address of the listener; before that it
+// returns the configured address.
 func (s *server) Addr() string {
-	return s.opts.addr
+	s.mu.Lock()
+
+	if s.listener != nil {
+		addr := s.listener.Addr().String()
+		s.mu.Unlock()
+		return addr
+	}
+
+	addr := s.opts.addr
+	s.mu.Unlock()
+
+	return addr
 }
 
-// Start 启动服务器
+// Start starts the server.
+//
+// It initializes the listener, serves connections in a goroutine and then invokes the start hook.
 func (s *server) Start() error {
+	s.mu.Lock()
+
 	if err := s.init(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
+
+	ln := s.listener
+
+	go s.serve(ln)
+
+	s.mu.Unlock()
 
 	if s.startHandler != nil {
 		s.startHandler()
 	}
 
-	go s.serve()
-
 	return nil
 }
 
-// Stop 关闭服务器
+// Stop stops the server.
+//
+// It closes the listener and every connection, and then invokes the stop hook.
 func (s *server) Stop() error {
-	if err := s.listener.Close(); err != nil {
-		return err
+	return s.stop(nil)
+}
+
+// stop stops the server.
+//
+// It closes the listener and all connections. When ln is non-nil it is closed only while it is
+// still the current listener, so that an old serve goroutine exiting does not accidentally close a
+// new listener created by a restart.
+func (s *server) stop(ln net.Listener) error {
+	s.mu.Lock()
+
+	if s.listener == nil || (ln != nil && s.listener != ln) {
+		s.mu.Unlock()
+		return errors.ErrServerClosed
 	}
+
+	_ = s.listener.Close()
+	s.listener = nil
+	s.mu.Unlock()
 
 	s.connMgr.close()
 
+	if s.stopHandler != nil {
+		s.stopHandler()
+	}
+
 	return nil
 }
 
-// Protocol 协议
+// Protocol returns the protocol name "kcp".
 func (s *server) Protocol() string {
 	return protocol
 }
 
-// OnStart 监听服务器启动
+// OnStart registers handler to be invoked when the server starts.
 func (s *server) OnStart(handler network.StartHandler) {
 	s.startHandler = handler
 }
 
-// OnStop 监听服务器关闭
+// OnStop registers handler to be invoked when the server stops.
 func (s *server) OnStop(handler network.CloseHandler) {
 	s.stopHandler = handler
 }
 
-// OnConnect 监听连接打开
+// OnConnect registers handler to be invoked when a connection is opened.
 func (s *server) OnConnect(handler network.ConnectHandler) {
 	s.connectHandler = handler
 }
 
-// OnDisconnect 监听连接关闭
+// OnDisconnect registers handler to be invoked when a connection is closed.
 func (s *server) OnDisconnect(handler network.DisconnectHandler) {
 	s.disconnectHandler = handler
 }
 
-// OnReceive 监听接收到消息
+// OnHeartbeat registers handler to be invoked on a connection heartbeat.
+func (s *server) OnHeartbeat(handler network.HeartbeatHandler) {
+	s.heartbeatHandler = handler
+}
+
+// OnReceive registers handler to be invoked when a message is received.
 func (s *server) OnReceive(handler network.ReceiveHandler) {
 	s.receiveHandler = handler
 }
 
-// 初始化服务器
-func (s *server) init() error {
-	//key := pbkdf2.Key([]byte("demo pass"), []byte("demo salt"), 1024, 32, sha1.New)
-	//block, _ := kcp.NewAESBlockCrypt(key)
+// OnHandshake registers handler to be invoked when a handshake frame is received.
+func (s *server) OnHandshake(handler network.HandshakeHandler) {
+	s.handshakeHandler = handler
+}
 
-	ln, err := kcp.ListenWithOptions(s.opts.addr, nil, 0, 0)
+// init initializes the server.
+//
+// It creates the KCP listener and marks the server as started.
+func (s *server) init() error {
+	if s.listener != nil {
+		return errors.ErrServerStarted
+	}
+
+	addr, err := net.ResolveTCPAddr("tcp", s.opts.addr)
 	if err != nil {
 		return err
 	}
 
-	s.listener = ln
+	if s.listener, err = kcp.ListenWithOptions(addr.String(), nil, 0, 0); err != nil {
+		return err
+	}
+
+	if s.opts.enableProxyProtocol {
+		s.listener = &proxyproto.Listener{Listener: s.listener}
+	}
+
+	s.connMgr.open()
 
 	return nil
 }
 
-// 启动服务器
-func (s *server) serve() {
+// serve accepts KCP connections in a loop and hands them to the connection manager.
+//
+// Temporary errors, such as running out of file descriptors, are retried with exponential backoff
+// so that a transient hiccup does not bring the server down. When listening ends, every connection
+// is closed.
+func (s *server) serve(ln net.Listener) {
+	var tempDelay time.Duration
+
 	for {
-		conn, err := s.listener.AcceptKCP()
+		conn, err := ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				break
+			}
+
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+
+				if maxDelay := time.Second; tempDelay > maxDelay {
+					tempDelay = maxDelay
+				}
+
+				log.Warnf("kcp accept temporary error: %v, retrying in %v", err, tempDelay)
+
+				time.Sleep(tempDelay)
+
+				continue
+			}
+
 			log.Warnf("kcp accept error: %v", err)
-			return
+			break
 		}
 
-		if err = s.connMgr.allocate(conn); err != nil {
+		tempDelay = 0
+
+		var session *kcp.UDPSession
+		if pc, ok := conn.(*proxyproto.Conn); ok {
+			session = pc.Raw().(*kcp.UDPSession)
+		} else {
+			session = conn.(*kcp.UDPSession)
+		}
+
+		if err = s.connMgr.allocateConn(session); err != nil {
+			if errors.Is(err, errors.ErrServerClosed) {
+				log.Debugf("connection allocate error: %v", err)
+			} else {
+				log.Errorf("connection allocate error: %v", err)
+			}
 			_ = conn.Close()
 		}
 	}
+
+	_ = s.stop(ln)
 }

@@ -8,115 +8,177 @@ import (
 	"github.com/dobyte/due/v2/transport"
 )
 
+// Context is a message context.
+//
+// It wraps the basic information about the gateway, node, connection and user, and provides a
+// series of methods such as route handling, message delivery and actor operations.
 type Context interface {
-	// GID 获取网关ID
+	// GID returns the ID of the source gateway.
 	GID() string
-	// NID 获取节点ID
+	// NID returns the ID of the source node.
 	NID() string
-	// CID 获取连接ID
+	// CID returns the connection ID.
 	CID() int64
-	// UID 获取用户ID
+	// UID returns the user ID.
 	UID() int64
-	// Seq 获取消息序列号
+	// Seq returns the message sequence number.
 	Seq() int32
-	// Route 获取消息路由号
+	// Route returns the message route number.
 	Route() int32
-	// Event 获取事件类型
+	// Event returns the event type.
 	Event() cluster.Event
-	// Kind 上下文消息类型
+	// Kind returns the message kind, either an event or a request.
 	Kind() Kind
-	// Parse 解析消息
+	// Parse parses the message.
+	//
+	// By default it deserializes into the target value; when an encryptor is present and the
+	// message comes from a gateway, it decrypts the message before deserializing. It reports an
+	// error when the payload is empty, or when decryption or deserialization fails.
 	Parse(v any) error
-	// Defer 添加defer延迟调用栈
-	// 此方法功能与go defer一致，作用域也仅限于当前handler处理函数内，推荐使用Defer方法替代go defer使用
-	// 区别在于使用Defer方法可以对调用栈进行取消操作
-	// 同时，在调用Task和Next方法是会自动取消调用栈
-	// 也可通过Cancel方法进行手动取消调用栈
-	// bottom用于标识是否挂载到栈底部
+	// Defer adds a deferred call to the call stack.
+	//
+	// This method behaves like the go defer statement and its scope is limited to the current
+	// handler function, so it is recommended over go defer. The difference is that Defer allows
+	// the call stack to be cancelled. The stack is cancelled automatically when Task or Next is
+	// called, and it can also be cancelled manually with Cancel. The optional bottom controls
+	// whether fn is pushed to the bottom of the stack; it is pushed to the top by default.
 	Defer(fn func(), bottom ...bool)
-	// Cancel 取消defer调用栈
+	// Cancel cancels the defer call stack.
 	Cancel()
-	// Clone 克隆Context
+	// Clone clones the context.
+	//
+	// It creates a new independent context, which is used to deliver the message to another actor.
 	Clone() Context
-	// Task 投递任务
-	// 调用此方法会自动取消Defer调用栈的所有执行函数
+	// Task submits a task.
+	//
+	// It is recommended over task.Add and go func; calling it automatically cancels every function
+	// in the defer call stack.
+	//
+	// Task must be called at most once per context and must not be combined with Next. The task
+	// shares the context object, which is recycled and has its fields cleared once the latest
+	// stage finishes; overlapping stages would otherwise observe a cleared context.
 	Task(fn func(ctx Context))
-	// Proxy 获取代理API
+	// Proxy returns the node proxy.
 	Proxy() *Proxy
-	// Context 获取上下文
+	// Context returns the underlying standard context.
 	Context() context.Context
-	// SetValue 为上下文设置值
+	// SetValue sets a value on the context.
 	SetValue(key, val any)
-	// GetValue 获取上下文中的值
+	// GetValue returns the value associated with key, or nil when it does not exist.
 	GetValue(key any) any
-	// GetIP 获取客户端IP
+	// GetIP returns the client IP. It reports an error when the source is illegal or the IP cannot
+	// be retrieved.
 	GetIP() (string, error)
-	// Deliver 投递消息给节点处理
+	// Deliver delivers a message to a node for processing.
 	Deliver(args *cluster.DeliverArgs) error
-	// Reply 回复消息
+	// Reply replies with a message.
+	//
+	// According to the message source (gateway, actor or node), the message is sent back to the
+	// corresponding target.
 	Reply(message *cluster.Message) error
-	// Response 响应消息
+	// Response responds to the current route message.
+	//
+	// The response reuses the route number and sequence number of the original request.
 	Response(message any) error
-	// Disconnect 关闭来自网关的连接
+	// Disconnect closes the connection from the gateway. The optional force controls whether the
+	// connection is disconnected forcibly; it is not forced by default.
 	Disconnect(force ...bool) error
-	// BindGate 绑定网关
+	// BindGate binds the gateway. When uid is not specified, the uid of the current context user is
+	// used.
 	BindGate(uid ...int64) error
-	// UnbindGate 解绑网关
+	// UnbindGate unbinds the gateway. When uid is not specified, the uid of the current context
+	// user is used.
 	UnbindGate(uid ...int64) error
-	// BindNode 绑定节点
+	// BindNode binds the node. When uid is not specified, the uid of the current context user is
+	// used.
 	BindNode(uid ...int64) error
-	// UnbindNode 解绑节点
+	// UnbindNode unbinds the node. When uid is not specified, the uid of the current context user
+	// is used.
 	UnbindNode(uid ...int64) error
-	// Subscribe 订阅频道
+	// Subscribe subscribes to a channel. When uids are specified, it subscribes the user channels;
+	// otherwise it subscribes the channel of the current connection.
 	Subscribe(channel string, uids ...int64) error
-	// Unsubscribe 取消订阅
+	// Unsubscribe unsubscribes from a channel. When uids are specified, it unsubscribes the user
+	// channels; otherwise it unsubscribes the channel of the current connection.
 	Unsubscribe(channel string, uids ...int64) error
-	// BindActor 绑定Actor
+	// BindActor binds an actor, establishing a binding between the current user and the given
+	// actor.
 	BindActor(kind, id string) error
-	// UnbindActor 解绑Actor
+	// UnbindActor unbinds the actor of the given kind.
 	UnbindActor(kind string)
-	// Next 消息下放
-	// 调用此方法会自动取消Defer调用栈的所有执行函数
+	// Next dispatches the message down to the node.
+	//
+	// It hands the current message to the node's scheduler for a second dispatch. Calling it
+	// automatically cancels every function in the defer call stack.
 	Next() error
-	// Spawn 衍生出一个新的Actor
+	// Spawn derives a new actor.
+	//
+	// creator creates the actor processor and opts configures the new actor. It reports an error
+	// when an actor with the same kind and ID already exists or when creation fails.
 	Spawn(creator Creator, opts ...ActorOption) (*Actor, error)
-	// Kill 杀死存在的一个Actor
+	// Kill kills an existing actor, reporting whether it was killed successfully.
 	Kill(kind, id string) bool
-	// Actor 获取Actor
+	// Actor returns the actor with the given kind and ID, and whether it exists.
 	Actor(kind, id string) (*Actor, bool)
-	// Invoke 调用函数（线程安全）
-	// ctx在全局的处理器中，调用的就是proxy.Invoke
-	// ctx在Actor的处理器中，调用的就是actor.Invoke
-	Invoke(fn func())
-	// AfterFunc 延迟调用，与官方的time.AfterFunc用法一致
-	// ctx在全局的处理器中，调用的就是proxy.AfterFunc
-	// ctx在Actor的处理器中，调用的就是actor.AfterFunc
-	AfterFunc(d time.Duration, f func()) *Timer
-	// AfterInvoke 延迟调用（线程安全）
-	// ctx在全局的处理器中，调用的就是proxy.AfterInvoke
-	// ctx在Actor的处理器中，调用的就是actor.AfterInvoke
-	AfterInvoke(d time.Duration, f func()) *Timer
-	// NewMeshClient 新建微服务客户端
-	// target参数可分为三种种模式:
-	// 服务直连模式: 	direct://127.0.0.1:8011
-	// 服务直连模式: 	direct://711baf8d-8a06-11ef-b7df-f4f19e1f0070
-	// 服务发现模式: 	discovery://service_name
+	// Invoke calls a function in a thread-safe manner.
+	//
+	// Inside a global handler, it calls proxy.Invoke; inside an actor processor, it calls
+	// actor.Invoke. The optional isBlock controls whether the call is blocking; it is non-blocking
+	// by default.
+	Invoke(fn func(), isBlock ...bool) error
+	// AfterFunc schedules f to run after d, matching the semantics of [time.AfterFunc].
+	//
+	// Inside a global handler, it calls proxy.AfterFunc; inside an actor processor, it calls
+	// actor.AfterFunc. The returned [Timer] can be cancelled with Timer.Stop.
+	AfterFunc(d time.Duration, f func()) (*Timer, error)
+	// AfterInvoke schedules f to run after d in a thread-safe manner.
+	//
+	// After the delay, f is executed serially through the task queue, which keeps it thread-safe.
+	// Inside a global handler, it calls proxy.AfterInvoke; inside an actor processor, it calls
+	// actor.AfterInvoke. The returned [Timer] can be cancelled with Timer.Stop.
+	AfterInvoke(d time.Duration, f func()) (*Timer, error)
+	// NewMeshClient creates a new mesh service client.
+	//
+	// The target can be given in three forms:
+	//   - direct connection: direct://127.0.0.1:8011
+	//   - direct connection: direct://711baf8d-8a06-11ef-b7df-f4f19e1f0070
+	//   - service discovery: discovery://service_name
 	NewMeshClient(target string) (transport.Client, error)
-	// 保存当前Actor
+	// storeActor stores the current actor.
 	storeActor(actor *Actor)
-	// 增长版本号
+	// deleteActor deletes the current actor.
+	deleteActor()
+	// incrVersion increments the version and returns the new value.
 	incrVersion() int32
-	// 获取版本号
+	// decrVersion decrements the version and returns the new value.
+	decrVersion() int32
+	// loadVersion returns the current version.
 	loadVersion() int32
-	// 比对版本号后进行回收对象
+	// compareVersionRecycle recycles the object after comparing the version.
+	//
+	// When the versions match, it runs the post route handlers and releases the context object.
 	compareVersionRecycle(version int32)
-	// 执行defer调用栈
+	// compareVersionExecDefer executes the defer call stack.
+	//
+	// When the versions match, it fires the top function of the stack.
 	compareVersionExecDefer(version int32)
+	// cancelDefer cancels the defer call stack.
+	cancelDefer()
+	// recoverDefer recovers the defer call stack.
+	recoverDefer()
+	// releaseDefer releases the defer call stack. It clears the fields and returns the context
+	// object to the pool.
+	releaseDefer()
+	// release releases the context. It clears the fields and returns the context object to the
+	// pool.
+	release()
 }
 
+// Kind is the message kind.
 type Kind int
 
+// The kinds of a message.
 const (
-	Event   Kind = iota // 事件
-	Request             // 请求
+	Event   Kind = iota // Event: an event message
+	Request             // Request: a request message
 )

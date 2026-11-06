@@ -1,10 +1,4 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/9/15 5:37 下午
- * @Desc: TODO
- */
-
+// Package nacos_test contains manual verification scripts that require a local Nacos service.
 package nacos_test
 
 import (
@@ -149,7 +143,7 @@ func TestRegistry_Watch(t *testing.T) {
 }
 
 func TestMultipleNodeRegister(t *testing.T) {
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		go func(i int) {
 			n := newNode(xconv.String(i))
 			n.start()
@@ -160,7 +154,7 @@ func TestMultipleNodeRegister(t *testing.T) {
 }
 
 const (
-	defaultTimeout = 3 * time.Second // 默认超时时间
+	defaultTimeout = 3 * time.Second // Default timeout
 )
 
 type node struct {
@@ -204,7 +198,7 @@ func (n *node) start() {
 
 }
 
-// 执行注册操作
+// register registers the cluster instances.
 func (n *node) register() error {
 	eg, ctx := errgroup.WithContext(n.ctx)
 

@@ -1,12 +1,16 @@
 package direct
 
 import (
-	"github.com/dobyte/due/v2/log"
-	cli "github.com/smallnest/rpcx/client"
 	"sync"
 	"time"
+
+	"github.com/dobyte/due/v2/log"
+	cli "github.com/smallnest/rpcx/client"
 )
 
+// Resolver is the direct connection mode service discovery instance.
+//
+// It maintains the service address list and lets subscribers receive address change notifications.
 type Resolver struct {
 	builder *Builder
 	name    string
@@ -15,8 +19,10 @@ type Resolver struct {
 	pairs   []*cli.KVPair
 	crw     sync.RWMutex
 	chans   []chan []*cli.KVPair
+	closed  bool
 }
 
+// newResolver returns a new service discovery instance for direct connection mode.
 func newResolver(name string, builder *Builder) *Resolver {
 	return &Resolver{
 		name:    name,
@@ -24,7 +30,7 @@ func newResolver(name string, builder *Builder) *Resolver {
 	}
 }
 
-// GetServices returns the servers
+// GetServices returns the service address list.
 func (r *Resolver) GetServices() []*cli.KVPair {
 	r.prw.RLock()
 	defer r.prw.RUnlock()
@@ -32,18 +38,26 @@ func (r *Resolver) GetServices() []*cli.KVPair {
 	return r.pairs
 }
 
-// WatchService returns a nil chan.
+// WatchService watches service address changes.
+//
+// It returns a buffered change notification channel, or an already closed channel when the resolver
+// has been closed.
 func (r *Resolver) WatchService() chan []*cli.KVPair {
 	ch := make(chan []*cli.KVPair, 10)
 
 	r.crw.Lock()
+	if r.closed {
+		r.crw.Unlock()
+		close(ch)
+		return ch
+	}
 	r.chans = append(r.chans, ch)
 	r.crw.Unlock()
 
 	return ch
 }
 
-// RemoveWatcher remove a non-nil chan.
+// RemoveWatcher removes a watch channel.
 func (r *Resolver) RemoveWatcher(ch chan []*cli.KVPair) {
 	r.crw.Lock()
 	defer r.crw.Unlock()
@@ -62,25 +76,37 @@ func (r *Resolver) RemoveWatcher(ch chan []*cli.KVPair) {
 	r.chans = r.chans[:i+1]
 }
 
-// Clone clone a new resolver
+// Clone clones the service discovery instance; the direct connection mode reuses the current
+// instance directly.
 func (r *Resolver) Clone(servicePath string) (cli.ServiceDiscovery, error) {
 	return r, nil
 }
 
+// SetFilter sets the service filter function.
 func (r *Resolver) SetFilter(filter cli.ServiceDiscoveryFilter) {
 	r.filter = filter
 }
 
+// Close closes the service discovery instance.
+//
+// It removes itself from the builder and closes all watch channels.
 func (r *Resolver) Close() {
 	r.builder.removeResolver(r)
 
-	r.crw.RLock()
+	r.crw.Lock()
+	if r.closed {
+		r.crw.Unlock()
+		return
+	}
+	r.closed = true
 	for _, c := range r.chans {
 		close(c)
 	}
-	r.crw.RUnlock()
+	r.chans = nil
+	r.crw.Unlock()
 }
 
+// updateState updates the service address state and broadcasts the change.
 func (r *Resolver) updateState(list []*cli.KVPair) {
 	var pairs []*cli.KVPair
 
@@ -100,16 +126,30 @@ func (r *Resolver) updateState(list []*cli.KVPair) {
 	r.prw.Unlock()
 
 	r.crw.RLock()
-	for _, ch := range r.chans {
-		go func(ch chan []*cli.KVPair) {
-			defer func() { recover() }()
+	defer r.crw.RUnlock()
 
-			select {
-			case ch <- pairs:
-			case <-time.After(time.Minute):
-				log.Warn("chan is full and new change has been dropped")
-			}
-		}(ch)
+	if r.closed {
+		return
 	}
-	r.crw.RUnlock()
+
+	for _, ch := range r.chans {
+		select {
+		case ch <- pairs:
+			// Fast path: the consumer reads in time, no goroutine is spawned.
+		default:
+			// Slow path: the channel is full; wait up to 1 minute before dropping.
+			go func(ch chan []*cli.KVPair) {
+				defer func() { recover() }()
+
+				timer := time.NewTimer(time.Minute)
+				defer timer.Stop()
+
+				select {
+				case ch <- pairs:
+				case <-timer.C:
+					log.Warn("chan is full and new change has been dropped")
+				}
+			}(ch)
+		}
+	}
 }

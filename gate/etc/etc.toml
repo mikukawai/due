@@ -14,8 +14,9 @@ shutdownMaxWaitTime = "0s"
     name = "gate"
     # 内建RPC服务器监听地址。不填写默认随机监听
     addr = ":0"
-    # RPC调用超时时间
-    timeout = "1s"
+[cluster.gate.linker]
+    # v2.6.6 内部 RPC 调用超时；保留本项目配置的 1s
+    callTimeout = "1s"
 
 [locate.redis]
     # 客户端连接地址

@@ -2,27 +2,28 @@ package protocol
 
 import (
 	"encoding/binary"
-	"io"
 
+	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/internal/transporter/internal/codes"
+	"github.com/dobyte/due/v2/internal/transporter/internal/def"
 	"github.com/dobyte/due/v2/internal/transporter/internal/route"
-	"github.com/dobyte/due/v2/session"
 	"github.com/dobyte/due/v2/utils/xnet"
 )
 
 const (
-	getIPReqBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + b8 + b64
-	getIPResBytes = defaultSizeBytes + defaultHeaderBytes + defaultRouteBytes + defaultSeqBytes + defaultCodeBytes + b32
+	getIPReqBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.B8 + def.B64
+	getIPResBytes = def.SizeBytes + def.HeaderBytes + def.RouteBytes + def.SeqBytes + def.CodeBytes + def.B32
 )
 
-// EncodeGetIPReq 编码获取IP请求
-// 协议：size + header + route + seq + session kind + target
-func EncodeGetIPReq(seq uint64, kind session.Kind, target int64) *buffer.NocopyBuffer {
+// EncodeGetIPReq encodes a get-IP request.
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {session kind + target}
+func EncodeGetIPReq(seq uint64, kind cluster.Session, target int64) *buffer.NocopyBuffer {
 	writer := buffer.MallocWriter(getIPReqBytes)
-	writer.WriteUint32s(binary.BigEndian, uint32(getIPReqBytes-defaultSizeBytes))
-	writer.WriteUint8s(dataBit)
+	writer.WriteUint32s(binary.BigEndian, uint32(getIPReqBytes-def.SizeBytes))
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.GetIP)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint8s(uint8(kind))
@@ -31,49 +32,34 @@ func EncodeGetIPReq(seq uint64, kind session.Kind, target int64) *buffer.NocopyB
 	return buffer.NewNocopyBuffer(writer)
 }
 
-// DecodeGetIPReq 解码获取IP请求
-// 协议：size + header + route + seq + session kind + target
-func DecodeGetIPReq(data []byte) (seq uint64, kind session.Kind, target int64, err error) {
-	if len(data) != getIPReqBytes {
+// DecodeGetIPReq decodes a get-IP request.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {session kind + target}
+func DecodeGetIPReq(buf buffer.Buffer) (kind cluster.Session, target int64, err error) {
+	if buf.Len() != def.B8+def.B64 {
 		err = errors.ErrInvalidMessage
 		return
 	}
 
-	reader := buffer.NewReader(data)
-
-	if _, err = reader.Seek(defaultSizeBytes+defaultHeaderBytes+defaultRouteBytes, io.SeekStart); err != nil {
-		return
-	}
-
-	if seq, err = reader.ReadUint64(binary.BigEndian); err != nil {
-		return
-	}
-
-	var k uint8
-	if k, err = reader.ReadUint8(); err != nil {
-		return
-	} else {
-		kind = session.Kind(k)
-	}
-
-	if target, err = reader.ReadInt64(binary.BigEndian); err != nil {
-		return
-	}
+	data := buf.Bytes()
+	kind = cluster.Session(data[0])
+	target = int64(binary.BigEndian.Uint64(data[def.B8:]))
 
 	return
 }
 
-// EncodeGetIPRes 编码获取IP响应
-// 协议：size + header + route + seq + code + [ip]
+// EncodeGetIPRes encodes a get-IP response.
+// Note that buf contains the full protocol.
+// Protocol: public section: {size + header + route + seq} + private section: {code + [ip]}
 func EncodeGetIPRes(seq uint64, code uint16, ip ...string) *buffer.NocopyBuffer {
-	size := getIPResBytes - defaultSizeBytes
+	size := getIPResBytes - def.SizeBytes
 	if code != codes.OK || len(ip) == 0 || ip[0] == "" {
-		size -= 4
+		size -= def.B32
 	}
 
 	writer := buffer.MallocWriter(getIPResBytes)
 	writer.WriteUint32s(binary.BigEndian, uint32(size))
-	writer.WriteUint8s(dataBit)
+	writer.WriteUint8s(def.DataBit)
 	writer.WriteUint8s(route.GetIP)
 	writer.WriteUint64s(binary.BigEndian, seq)
 	writer.WriteUint16s(binary.BigEndian, code)
@@ -85,31 +71,20 @@ func EncodeGetIPRes(seq uint64, code uint16, ip ...string) *buffer.NocopyBuffer 
 	return buffer.NewNocopyBuffer(writer)
 }
 
-// DecodeGetIPRes 解码获取IP响应
-// 协议：size + header + route + seq + code + [ip]
-func DecodeGetIPRes(data []byte) (code uint16, ip string, err error) {
-	if len(data) != getIPResBytes && len(data) != getIPResBytes-4 {
+// DecodeGetIPRes decodes a get-IP response.
+// Note that buf contains only the private section.
+// Protocol: public section: {size + header + route + seq} + private section: {code + [ip]}
+func DecodeGetIPRes(buf buffer.Buffer) (code uint16, ip string, err error) {
+	if buf.Len() != def.CodeBytes && buf.Len() != def.CodeBytes+def.B32 {
 		err = errors.ErrInvalidMessage
 		return
 	}
 
-	reader := buffer.NewReader(data)
+	data := buf.Bytes()
+	code = binary.BigEndian.Uint16(data[:def.CodeBytes])
 
-	if _, err = reader.Seek(defaultSizeBytes+defaultHeaderBytes+defaultRouteBytes+defaultSeqBytes, io.SeekStart); err != nil {
-		return
-	}
-
-	if code, err = reader.ReadUint16(binary.BigEndian); err != nil {
-		return
-	}
-
-	if code == codes.OK && len(data) == getIPResBytes {
-		var v uint32
-		if v, err = reader.ReadUint32(binary.BigEndian); err != nil {
-			return
-		} else {
-			ip = xnet.Long2IP(v)
-		}
+	if code == codes.OK && buf.Len() == def.CodeBytes+def.B32 {
+		ip = xnet.Long2IP(binary.BigEndian.Uint32(data[def.CodeBytes:]))
 	}
 
 	return

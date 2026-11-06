@@ -1,16 +1,21 @@
 # OS general
-*/.DS_Store
+*.DS_Store
 
 # Docker container's temp data
 docker/*/
+!docker/nacos/conf/application.properties
 
 # Test data
 testdata/log/
 
 # Develop tools
-.vscode
+.vscode/
 .idea/
-.qoder
+.qoder/
+.tmp/
+.tmp-gocache/
+.tmp-go-cache/
+.agents/
 
 # Go workspace
 go.work
@@ -23,9 +28,6 @@ go.work.sum
 
 # log gzip file
 *.gz
-
-# goland idea
-.idea
 
 # project run dir
 *run/
@@ -40,3 +42,8 @@ gate/gate
 node/node
 node/token
 client/client
+mcp-client/mcp-client
+
+# Python smoke-test bytecode
+__pycache__/
+*.py[cod]

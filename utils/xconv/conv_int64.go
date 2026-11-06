@@ -10,6 +10,11 @@ import (
 	"github.com/dobyte/due/v2/utils/xreflect"
 )
 
+// Int64 converts val to an int64.
+//
+// It supports all basic numeric types, bool, time.Time, []byte (parsed as a big-endian 64-bit
+// integer and at most 8 bytes long) and types handled through reflection such as strings; it
+// returns 0 when the conversion fails.
 func Int64(val any) int64 {
 	if val == nil {
 		return 0
@@ -19,58 +24,100 @@ func Int64(val any) int64 {
 	case int:
 		return int64(v)
 	case *int:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case int8:
 		return int64(v)
 	case *int8:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case int16:
 		return int64(v)
 	case *int16:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case int32:
 		return int64(v)
 	case *int32:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case int64:
 		return v
 	case *int64:
+		if v == nil {
+			return 0
+		}
 		return *v
 	case uint:
 		return int64(v)
 	case *uint:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case uint8:
 		return int64(v)
 	case *uint8:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case uint16:
 		return int64(v)
 	case *uint16:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case uint32:
 		return int64(v)
 	case *uint32:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case uint64:
 		return int64(v)
 	case *uint64:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case float32:
 		return int64(v)
 	case *float32:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case float64:
 		return int64(v)
 	case *float64:
+		if v == nil {
+			return 0
+		}
 		return int64(*v)
 	case complex64:
 		return int64(real(v))
 	case *complex64:
+		if v == nil {
+			return 0
+		}
 		return int64(real(*v))
 	case complex128:
 		return int64(real(v))
 	case *complex128:
+		if v == nil {
+			return 0
+		}
 		return int64(real(*v))
 	case bool:
 		if v {
@@ -78,15 +125,22 @@ func Int64(val any) int64 {
 		}
 		return 0
 	case *bool:
-		if *v {
+		if v != nil && *v {
 			return 1
 		}
 		return 0
 	case time.Time:
 		return v.UnixNano()
 	case *time.Time:
+		if v == nil {
+			return 0
+		}
 		return v.UnixNano()
 	case []byte:
+		if len(v) > 8 {
+			return 0
+		}
+
 		buf := make([]byte, 8)
 		copy(buf[len(buf)-len(v):], v)
 
@@ -97,6 +151,9 @@ func Int64(val any) int64 {
 			return 0
 		}
 	case *[]byte:
+		if v == nil {
+			return 0
+		}
 		return Int64(*v)
 	default:
 		switch rk, rv := xreflect.Value(val); rk {
@@ -123,6 +180,7 @@ func Int64(val any) int64 {
 	}
 }
 
+// Int64s converts val to an int64 slice.
 func Int64s(val any) (slice []int64) {
 	if val == nil {
 		return
@@ -135,6 +193,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]int:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -145,6 +206,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]int8:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -155,6 +219,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]int16:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -165,6 +232,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]int32:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -172,6 +242,9 @@ func Int64s(val any) (slice []int64) {
 	case []int64:
 		return v
 	case *[]int64:
+		if v == nil {
+			return
+		}
 		return *v
 	case []uint:
 		slice = make([]int64, len(v))
@@ -179,6 +252,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]uint:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -189,6 +265,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]uint8:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -199,6 +278,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]uint16:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -209,6 +291,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]uint32:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -219,6 +304,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]uint64:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -229,6 +317,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]float32:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -239,6 +330,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]float64:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -249,6 +343,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]complex64:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -259,6 +356,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]complex128:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -269,6 +369,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]string:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -279,6 +382,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]bool:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -289,6 +395,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[]any:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -299,6 +408,9 @@ func Int64s(val any) (slice []int64) {
 			slice[i] = Int64(v[i])
 		}
 	case *[][]byte:
+		if v == nil {
+			return
+		}
 		slice = make([]int64, len(*v))
 		for i := range *v {
 			slice[i] = Int64((*v)[i])
@@ -317,11 +429,13 @@ func Int64s(val any) (slice []int64) {
 	return
 }
 
+// Int64Pointer converts val to a pointer to int64.
 func Int64Pointer(any any) *int64 {
 	v := Int64(any)
 	return &v
 }
 
+// Int64sPointer converts val to a pointer to an int64 slice.
 func Int64sPointer(any any) *[]int64 {
 	v := Int64s(any)
 	return &v

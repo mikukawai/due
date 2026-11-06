@@ -2,8 +2,9 @@ package packet
 
 import (
 	"encoding/binary"
-	"github.com/dobyte/due/v2/etc"
 	"strings"
+
+	"github.com/dobyte/due/v2/etc"
 )
 
 // heartbeat packet
@@ -40,29 +41,28 @@ const (
 )
 
 type options struct {
-	// 字节序
-	// 默认为binary.LittleEndian
+	// Byte order; defaults to binary.BigEndian.
 	byteOrder binary.ByteOrder
 
-	// 路由字节数
-	// 默认为2字节
+	// Number of route bytes; defaults to 2 bytes.
 	routeBytes int
 
-	// 序列号字节数，长度为0时不开启序列号编码
-	// 默认为2字节
+	// Number of sequence-number bytes; sequence-number encoding is disabled when it is 0.
+	// Defaults to 2 bytes.
 	seqBytes int
 
-	// 消息字节数
-	// 默认为5000字节
+	// Number of message bytes; defaults to 5000 bytes.
 	bufferBytes int
 
-	// 是否携带心跳时间
-	// 默认为false
+	// Whether the heartbeat time is carried; defaults to false.
 	heartbeatTime bool
 }
 
 type Option func(o *options)
 
+// defaultOptions returns the default packing options.
+//
+// It reads each option from the configuration center to build the default packing options.
 func defaultOptions() *options {
 	opts := &options{
 		byteOrder:     binary.BigEndian,
@@ -72,8 +72,7 @@ func defaultOptions() *options {
 		heartbeatTime: etc.Get(defaultHeartbeatTimeKey, defaultHeartbeatTime).Bool(),
 	}
 
-	endian := etc.Get(defaultEndianKey, bigEndian).String()
-	switch strings.ToLower(endian) {
+	switch endian := etc.Get(defaultEndianKey, bigEndian).String(); strings.ToLower(endian) {
 	case littleEndian:
 		opts.byteOrder = binary.LittleEndian
 	case bigEndian:
@@ -83,27 +82,32 @@ func defaultOptions() *options {
 	return opts
 }
 
-// WithByteOrder 设置字节序
+// WithByteOrder returns an Option that sets the byte order.
 func WithByteOrder(byteOrder binary.ByteOrder) Option {
 	return func(o *options) { o.byteOrder = byteOrder }
 }
 
-// WithRouteBytes 设置路由字节数
+// WithRouteBytes returns an Option that sets the number of route bytes.
+//
+// The number of route bytes must be 1, 2 or 4.
 func WithRouteBytes(routeBytes int) Option {
 	return func(o *options) { o.routeBytes = routeBytes }
 }
 
-// WithSeqBytes 设置序列号字节数
+// WithSeqBytes returns an Option that sets the number of sequence-number bytes.
+//
+// It may be 0, 1, 2 or 4; sequence-number encoding is disabled when it is 0.
 func WithSeqBytes(seqBytes int) Option {
 	return func(o *options) { o.seqBytes = seqBytes }
 }
 
-// WithBufferBytes 设置消息字节数
+// WithBufferBytes returns an Option that sets the number of message bytes, that is, the maximum
+// allowed message size.
 func WithBufferBytes(bufferBytes int) Option {
 	return func(o *options) { o.bufferBytes = bufferBytes }
 }
 
-// WithHeartbeatTime 是否携带心跳时间
+// WithHeartbeatTime returns an Option that sets whether the heartbeat time is carried.
 func WithHeartbeatTime(heartbeatTime bool) Option {
 	return func(o *options) { o.heartbeatTime = heartbeatTime }
 }

@@ -6,152 +6,168 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dobyte/due/v2/core/buffer"
+	"github.com/dobyte/due/v2/core/queue"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/network"
 	"github.com/dobyte/due/v2/packet"
-	"github.com/dobyte/due/v2/utils/xcall"
+	taskpool "github.com/dobyte/due/v2/task"
 	"github.com/dobyte/due/v2/utils/xnet"
-	"github.com/dobyte/due/v2/utils/xtime"
 	"github.com/xtaci/kcp-go/v5"
 )
 
 type clientConn struct {
-	rw                sync.RWMutex
-	id                int64           // 连接ID
-	uid               int64           // 用户ID
-	attr              *attr           // 连接属性
-	conn              *kcp.UDPSession // UDP源连接
-	state             atomic.Int32    // 连接状态
-	client            *client         // 客户端
-	chWrite           chan chWrite    // 写入队列
-	done              chan struct{}   // 写入完成信号
-	close             chan struct{}   // 关闭信号
-	lastHeartbeatTime atomic.Int64    // 上次心跳时间
+	rw                sync.RWMutex                // Lock
+	id                int64                       // Connection ID
+	uid               atomic.Int64                // User ID
+	attr              *attr                       // Connection attributes
+	conn              *kcp.UDPSession             // Source UDP connection
+	state             atomic.Int32                // Connection state
+	cli               *client                     // Client
+	wg1               sync.WaitGroup              // Read wait group
+	wg2               sync.WaitGroup              // Write wait group
+	queue             *queue.Queue[buffer.Buffer] // Message queue
+	dueBuffers        []buffer.Buffer             // Buffers pending write
+	netBuffers        net.Buffers                 // Byte slices pending write
+	lastHeartbeatTime atomic.Int64                // Time of the last heartbeat
 }
 
 var _ network.Conn = &clientConn{}
 
-func newClientConn(client *client, id int64, conn *kcp.UDPSession) network.Conn {
-	c := &clientConn{
-		id:      id,
-		attr:    &attr{},
-		conn:    conn,
-		client:  client,
-		chWrite: make(chan chWrite, 4096),
-		done:    make(chan struct{}),
-		close:   make(chan struct{}),
-	}
-
+// newClientConn returns a new client connection.
+//
+// It initializes the connection state, the write queue and the two read/write goroutines, and
+// applies the KCP parameters configured on the client.
+func newClientConn(cli *client, conn *kcp.UDPSession) network.Conn {
+	c := &clientConn{}
+	c.id = cli.cid.Add(1)
+	c.attr = &attr{}
+	c.conn = conn
+	c.cli = cli
 	c.state.Store(int32(network.ConnOpened))
-	c.lastHeartbeatTime.Store(xtime.Now().UnixNano())
+	c.queue = queue.NewQueue[buffer.Buffer](int32(max(minWriteQueueSize, cli.opts.writeQueueSize)), cli.opts.writeTimeout)
+	c.dueBuffers = make([]buffer.Buffer, 0, maxBatchWriteNum)
+	c.netBuffers = make(net.Buffers, 0, 2*maxBatchWriteNum)
+	c.lastHeartbeatTime.Store(time.Now().UnixNano())
+	c.wg1.Go(func() { c.read(conn) })
+	c.wg2.Go(func() { c.write(conn) })
 
-	if c.client.opts.mtu > 0 {
-		conn.SetMtu(c.client.opts.mtu)
+	if c.cli.opts.mtu > 0 {
+		conn.SetMtu(c.cli.opts.mtu)
 	}
 
-	if len(c.client.opts.noDelay) == 4 {
-		conn.SetNoDelay(c.client.opts.noDelay[0], c.client.opts.noDelay[1], c.client.opts.noDelay[2], c.client.opts.noDelay[3])
+	if len(c.cli.opts.noDelay) == 4 {
+		conn.SetNoDelay(c.cli.opts.noDelay[0], c.cli.opts.noDelay[1], c.cli.opts.noDelay[2], c.cli.opts.noDelay[3])
 	}
 
-	if c.client.opts.ackNoDelay {
-		conn.SetACKNoDelay(c.client.opts.ackNoDelay)
+	if c.cli.opts.ackNoDelay {
+		conn.SetACKNoDelay(c.cli.opts.ackNoDelay)
 	}
 
-	if c.client.opts.writeDelay {
-		conn.SetWriteDelay(c.client.opts.writeDelay)
+	if c.cli.opts.writeDelay {
+		conn.SetWriteDelay(c.cli.opts.writeDelay)
 	}
 
-	if len(c.client.opts.windowSize) == 2 {
-		conn.SetWindowSize(c.client.opts.windowSize[0], c.client.opts.windowSize[1])
+	if len(c.cli.opts.windowSize) == 2 {
+		conn.SetWindowSize(c.cli.opts.windowSize[0], c.cli.opts.windowSize[1])
 	}
 
-	if c.client.opts.readBuffer > 0 {
-		conn.SetReadBuffer(c.client.opts.readBuffer)
+	if c.cli.opts.readBuffer > 0 {
+		conn.SetReadBuffer(c.cli.opts.readBuffer)
 	}
 
-	if c.client.opts.writeBuffer > 0 {
-		conn.SetWriteBuffer(c.client.opts.writeBuffer)
+	if c.cli.opts.writeBuffer > 0 {
+		conn.SetWriteBuffer(c.cli.opts.writeBuffer)
 	}
 
-	xcall.Go(c.read)
-
-	xcall.Go(c.write)
-
-	if c.client.connectHandler != nil {
-		c.client.connectHandler(c)
+	if c.cli.connectHandler != nil {
+		c.cli.connectHandler(c)
 	}
 
 	return c
 }
 
-// ID 获取连接ID
+// ID returns the connection ID.
 func (c *clientConn) ID() int64 {
 	return c.id
 }
 
-// UID 获取用户ID
+// UID returns the bound user ID, or 0 when none is bound.
 func (c *clientConn) UID() int64 {
-	return atomic.LoadInt64(&c.uid)
+	return c.uid.Load()
 }
 
-// Attr 获取属性接口
+// Attr returns the attribute interface used to read and write custom attributes.
 func (c *clientConn) Attr() network.Attr {
 	return c.attr
 }
 
-// Bind 绑定用户ID
-func (c *clientConn) Bind(uid int64) {
-	atomic.StoreInt64(&c.uid, uid)
-}
+// Bind binds uid to the connection. It reports [errors.ErrConnectionClosed] when the connection has
+// already been closed.
+func (c *clientConn) Bind(uid int64) error {
+	c.rw.RLock()
 
-// Unbind 解绑用户ID
-func (c *clientConn) Unbind() {
-	atomic.StoreInt64(&c.uid, 0)
-}
-
-// Send 发送消息（同步）
-func (c *clientConn) Send(msg []byte) error {
-	if err := c.checkState(); err != nil {
-		return err
+	if c.isClosed() {
+		c.rw.RUnlock()
+		return errors.ErrConnectionClosed
 	}
 
-	c.rw.RLock()
-	conn := c.conn
+	c.uid.Store(uid)
+
 	c.rw.RUnlock()
-
-	if conn == nil {
-		return errors.ErrConnectionClosed
-	}
-
-	_, err := conn.Write(msg)
-	return err
-}
-
-// Push 发送消息（异步）
-func (c *clientConn) Push(msg []byte) error {
-	if err := c.checkState(); err != nil {
-		return err
-	}
-
-	c.rw.RLock()
-	defer c.rw.RUnlock()
-
-	if c.conn == nil {
-		return errors.ErrConnectionClosed
-	}
-
-	c.chWrite <- chWrite{typ: dataPacket, msg: msg}
 
 	return nil
 }
 
-// State 获取连接状态
+// Unbind removes the bound user ID. It reports [errors.ErrConnectionClosed] when the connection has
+// already been closed.
+func (c *clientConn) Unbind() error {
+	c.rw.RLock()
+
+	if c.isClosed() {
+		c.rw.RUnlock()
+		return errors.ErrConnectionClosed
+	}
+
+	c.uid.Store(0)
+
+	c.rw.RUnlock()
+
+	return nil
+}
+
+// Push sends a message.
+//
+// The message is written to the write queue and dispatched by the write goroutine. When the send
+// fails, releasing the buffer is left to the caller.
+func (c *clientConn) Push(buf buffer.Buffer) error {
+	if buf.Len() == 0 {
+		return errors.ErrInvalidMessage
+	}
+
+	c.rw.RLock()
+
+	if err := c.checkState(); err != nil {
+		c.rw.RUnlock()
+		return err
+	}
+
+	err := c.queue.Write(buf)
+
+	c.rw.RUnlock()
+
+	return err
+}
+
+// State returns the current connection state.
 func (c *clientConn) State() network.ConnState {
 	return network.ConnState(c.state.Load())
 }
 
-// Close 关闭连接
+// Close closes the connection.
+//
+// It closes immediately when force is true; otherwise it performs a graceful close.
 func (c *clientConn) Close(force ...bool) error {
 	if len(force) > 0 && force[0] {
 		return c.forceClose()
@@ -160,7 +176,7 @@ func (c *clientConn) Close(force ...bool) error {
 	}
 }
 
-// LocalIP 获取本地IP
+// LocalIP returns the local IP address.
 func (c *clientConn) LocalIP() (string, error) {
 	addr, err := c.LocalAddr()
 	if err != nil {
@@ -170,24 +186,22 @@ func (c *clientConn) LocalIP() (string, error) {
 	return xnet.ExtractIP(addr)
 }
 
-// LocalAddr 获取本地地址
+// LocalAddr returns the local network address.
 func (c *clientConn) LocalAddr() (net.Addr, error) {
-	if err := c.checkState(); err != nil {
-		return nil, err
-	}
-
 	c.rw.RLock()
-	conn := c.conn
-	c.rw.RUnlock()
 
-	if conn == nil {
+	if c.isClosed() {
+		c.rw.RUnlock()
 		return nil, errors.ErrConnectionClosed
 	}
+
+	conn := c.conn
+	c.rw.RUnlock()
 
 	return conn.LocalAddr(), nil
 }
 
-// RemoteIP 获取远端IP
+// RemoteIP returns the remote IP address.
 func (c *clientConn) RemoteIP() (string, error) {
 	addr, err := c.RemoteAddr()
 	if err != nil {
@@ -197,24 +211,25 @@ func (c *clientConn) RemoteIP() (string, error) {
 	return xnet.ExtractIP(addr)
 }
 
-// RemoteAddr 获取远端地址
+// RemoteAddr returns the remote network address.
 func (c *clientConn) RemoteAddr() (net.Addr, error) {
-	if err := c.checkState(); err != nil {
-		return nil, err
-	}
-
 	c.rw.RLock()
-	conn := c.conn
-	c.rw.RUnlock()
 
-	if conn == nil {
+	if c.isClosed() {
+		c.rw.RUnlock()
 		return nil, errors.ErrConnectionClosed
 	}
+
+	conn := c.conn
+	c.rw.RUnlock()
 
 	return conn.RemoteAddr(), nil
 }
 
-// 检测连接状态
+// checkState checks the connection state.
+//
+// It returns the error matching the hanged or closed state, and nil when the connection is normal:
+// [errors.ErrConnectionHanged] when hanged and [errors.ErrConnectionClosed] when closed.
 func (c *clientConn) checkState() error {
 	switch c.State() {
 	case network.ConnHanged:
@@ -226,7 +241,12 @@ func (c *clientConn) checkState() error {
 	}
 }
 
-// 优雅关闭
+// graceClose closes the connection gracefully.
+//
+// It writes the close signal, waits for the write queue to drain and then closes the connection,
+// so that as many buffered messages as possible are delivered. When a graceful close timeout is
+// configured, a queue that has not drained in time disconnects the underlying connection directly
+// to end the wait forcibly.
 func (c *clientConn) graceClose() error {
 	if !c.state.CompareAndSwap(int32(network.ConnOpened), int32(network.ConnHanged)) {
 		return errors.ErrConnectionNotOpened
@@ -237,170 +257,280 @@ func (c *clientConn) graceClose() error {
 		c.rw.RUnlock()
 		return errors.ErrConnectionClosed
 	}
-	c.chWrite <- chWrite{typ: closeSig}
+	conn := c.conn
+	q := c.queue
+	err := q.Write(buffer.NewBytes(nil))
 	c.rw.RUnlock()
 
-	<-c.done
-
-	if !c.state.CompareAndSwap(int32(network.ConnHanged), int32(network.ConnClosed)) {
-		return errors.ErrConnectionNotHanged
-	}
-
-	return c.doClose()
-}
-
-// 强制关闭
-func (c *clientConn) forceClose() error {
-	if !c.state.CompareAndSwap(int32(network.ConnOpened), int32(network.ConnClosed)) {
-		if !c.state.CompareAndSwap(int32(network.ConnHanged), int32(network.ConnClosed)) {
-			return errors.ErrConnectionClosed
+	if err == nil {
+		if closeTimeout := c.cli.opts.closeTimeout; closeTimeout > 0 {
+			// A drain timeout disconnects the underlying connection, interrupting any write
+			// operation that may be blocking in the write goroutine.
+			timer := time.AfterFunc(closeTimeout, func() { _ = conn.Close() })
+			q.Wait()
+			timer.Stop()
+		} else {
+			q.Wait()
 		}
 	}
 
+	if c.state.Swap(int32(network.ConnClosed)) == int32(network.ConnClosed) {
+		return errors.ErrConnectionClosed
+	}
+
 	return c.doClose()
 }
 
-// 执行关闭操作
-func (c *clientConn) doClose() error {
-	c.rw.Lock()
+// forceClose closes the connection forcibly.
+//
+// It switches the state to closed and closes the connection immediately without waiting for the
+// write queue to drain.
+func (c *clientConn) forceClose() error {
+	if c.state.Swap(int32(network.ConnClosed)) == int32(network.ConnClosed) {
+		return errors.ErrConnectionClosed
+	}
 
+	return c.doClose(true)
+}
+
+// doClose performs the close operation.
+//
+// It closes the write queue, waits for the read and write goroutines to exit, closes the KCP
+// connection and finally triggers the disconnect hook. When force is true it closes the KCP
+// connection first to interrupt any write operation that may be blocking in the write goroutine,
+// which guarantees forced-close semantics.
+func (c *clientConn) doClose(force ...bool) error {
+	c.rw.Lock()
 	if c.conn == nil {
 		c.rw.Unlock()
 		return errors.ErrConnectionClosed
 	}
 
-	close(c.chWrite)
-	close(c.close)
-	close(c.done)
+	c.queue.Close()
 	conn := c.conn
 	c.conn = nil
 	c.rw.Unlock()
 
-	err := conn.Close()
+	var err error
 
-	if c.client.disconnectHandler != nil {
-		c.client.disconnectHandler(c)
+	if len(force) > 0 && force[0] {
+		err = conn.Close()
+		c.wg2.Wait()
+	} else {
+		c.wg2.Wait()
+		err = conn.Close()
+	}
+
+	c.wg1.Wait()
+
+	for buf := range c.queue.Read() {
+		buf.Release()
+	}
+
+	if c.cli.disconnectHandler != nil {
+		c.cli.disconnectHandler(c)
 	}
 
 	return err
 }
 
-// 读取消息
-func (c *clientConn) read() {
-	conn := c.conn
+// read reads messages.
+//
+// It reads KCP data in a loop, checks the connection state and heartbeat packets, and hands valid
+// messages to the receive hook.
+func (c *clientConn) read(conn *kcp.UDPSession) {
+	var index = 0
 
 	for {
-		select {
-		case <-c.close:
+		frameType, heartbeatTime, buf, err := packet.Read(conn)
+		if err != nil {
+			taskpool.Add(func() { c.forceClose() })
 			return
-		default:
-			data, err := packet.ReadMessage(conn)
-			if err != nil {
-				_ = c.forceClose()
+		}
+
+		switch c.State() {
+		case network.ConnClosed:
+			if frameType != packet.FrameHeartbeat {
+				buf.Release()
+			}
+			return
+		case network.ConnHanged:
+			if frameType != packet.FrameHeartbeat {
+				buf.Release()
 				return
 			}
+		}
 
-			if c.client.opts.heartbeatInterval > 0 {
-				c.lastHeartbeatTime.Store(xtime.Now().UnixNano())
+		if frameType == packet.FrameHeartbeat {
+			// update heartbeat time
+			if c.cli.opts.heartbeatInterval > 0 {
+				c.lastHeartbeatTime.Store(time.Now().UnixNano())
 			}
 
-			switch c.State() {
-			case network.ConnHanged:
-				continue
-			case network.ConnClosed:
-				return
-			default:
-				// ignore
+			// trigger heartbeat handler
+			if c.cli.heartbeatHandler != nil {
+				c.cli.heartbeatHandler(c, heartbeatTime)
+			}
+		} else {
+			// update heartbeat time
+			if c.cli.opts.heartbeatInterval > 0 {
+				index++
+
+				if index%10 == 0 {
+					c.lastHeartbeatTime.Store(time.Now().UnixNano())
+				}
 			}
 
 			// ignore empty packet
-			if len(data) == 0 {
+			if buf.Len() == 0 {
+				buf.Release()
 				continue
 			}
 
-			isHeartbeat, err := packet.CheckHeartbeat(data)
-			if err != nil {
-				log.Errorf("check heartbeat message error: %v", err)
-				continue
-			}
-
-			// ignore heartbeat packet
-			if isHeartbeat {
-				continue
-			}
-
-			if c.client.receiveHandler != nil {
-				c.client.receiveHandler(c, data)
+			if frameType == packet.FrameHandshake && c.cli.handshakeHandler != nil {
+				c.cli.handshakeHandler(c, buf)
+			} else if c.cli.receiveHandler != nil {
+				c.cli.receiveHandler(c, buf)
+			} else {
+				buf.Release()
 			}
 		}
 	}
 }
 
-// 写入消息
-func (c *clientConn) write() {
-	var (
-		conn   = c.conn
-		ticker *time.Ticker
-	)
+// write writes messages.
+//
+// It takes messages from the write queue and writes them to the connection, and triggers heartbeat
+// detection and dispatch at the heartbeat interval.
+func (c *clientConn) write(conn *kcp.UDPSession) {
+	var tickerC <-chan time.Time
 
-	if c.client.opts.heartbeatInterval > 0 {
-		ticker = time.NewTicker(c.client.opts.heartbeatInterval)
+	if c.cli.opts.heartbeatInterval > 0 {
+		ticker := time.NewTicker(c.cli.opts.heartbeatInterval)
 		defer ticker.Stop()
-	} else {
-		ticker = &time.Ticker{C: make(chan time.Time, 1)}
+		tickerC = ticker.C
 	}
 
 	for {
 		select {
-		case r, ok := <-c.chWrite:
+		case buf, ok := <-c.queue.Read():
 			if !ok {
 				return
 			}
 
-			if r.typ == closeSig {
-				c.rw.RLock()
-				c.done <- struct{}{}
-				c.rw.RUnlock()
-				return
-			}
-
-			if c.isClosed() {
-				return
-			}
-
-			if _, err := conn.Write(r.msg); err != nil {
-				log.Errorf("write data message error: %v", err)
-			}
-		case t, ok := <-ticker.C:
+			c.doBatchWrite(conn, buf)
+		case t, ok := <-tickerC:
 			if !ok {
 				return
 			}
 
-			deadline := t.Add(-2 * c.client.opts.heartbeatInterval).UnixNano()
-
-			if c.lastHeartbeatTime.Load() < deadline {
-				log.Debugf("connection heartbeat timeout")
-				_ = c.forceClose()
+			if !c.doHandleHeartbeat(conn, t) {
 				return
-			} else {
-				if c.isClosed() {
-					return
-				}
-
-				if heartbeat, err := packet.PackHeartbeat(); err != nil {
-					log.Errorf("pack heartbeat message error: %v", err)
-				} else {
-					// send heartbeat packet
-					if _, err := conn.Write(heartbeat); err != nil {
-						log.Errorf("write heartbeat message error: %v", err)
-					}
-				}
 			}
 		}
 	}
 }
 
-// 是否已关闭
+// doBatchWrite writes messages in a batch.
+//
+// It takes tasks from the write queue in a batch, collects their byte slices and dispatches them
+// with a single WriteBuffers call to reduce the number of system calls.
+func (c *clientConn) doBatchWrite(conn *kcp.UDPSession, first buffer.Buffer) {
+	closeSig := first.Len() == 0
+
+	c.queue.Done(closeSig)
+
+	if closeSig {
+		first.Release()
+		return
+	}
+
+	c.dueBuffers = c.dueBuffers[:0]
+	c.dueBuffers = append(c.dueBuffers, first)
+
+	for len(c.dueBuffers) < maxBatchWriteNum {
+		select {
+		case buf, ok := <-c.queue.Read():
+			if !ok {
+				goto OVER
+			}
+
+			closeSig = buf.Len() == 0
+
+			c.queue.Done(closeSig)
+
+			if closeSig {
+				buf.Release()
+				goto OVER
+			}
+
+			c.dueBuffers = append(c.dueBuffers, buf)
+		default:
+			goto OVER
+		}
+	}
+
+OVER:
+	c.netBuffers = c.netBuffers[:0]
+
+	for _, buf := range c.dueBuffers {
+		buf.VisitBytes(func(bytes []byte) bool {
+			c.netBuffers = append(c.netBuffers, bytes)
+			return true
+		})
+	}
+
+	if len(c.netBuffers) > 0 {
+		if c.cli.opts.writeTimeout > 0 {
+			_ = conn.SetWriteDeadline(time.Now().Add(c.cli.opts.writeTimeout))
+		}
+
+		if _, err := conn.WriteBuffers(c.netBuffers); err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				log.Warnf("write message error: %v", err)
+				taskpool.Add(func() { c.forceClose() })
+			}
+		}
+	}
+
+	for _, buf := range c.dueBuffers {
+		buf.Release()
+	}
+
+	c.netBuffers = c.netBuffers[:0]
+	c.dueBuffers = c.dueBuffers[:0]
+}
+
+// doHandleHeartbeat handles heartbeats.
+//
+// It forcibly closes the connection when the heartbeat timeout threshold is exceeded; otherwise it
+// sends a heartbeat packet to the peer. It returns whether to keep running, which is false when the
+// connection was forcibly closed for a heartbeat timeout.
+func (c *clientConn) doHandleHeartbeat(conn *kcp.UDPSession, t time.Time) bool {
+	if c.lastHeartbeatTime.Load() < t.Add(-2*c.cli.opts.heartbeatInterval).UnixNano() {
+		log.Debugf("connection heartbeat timeout, cid: %d", c.id)
+
+		taskpool.Add(func() { c.forceClose() })
+
+		return false
+	} else {
+		if c.cli.opts.writeTimeout > 0 {
+			_ = conn.SetWriteDeadline(time.Now().Add(c.cli.opts.writeTimeout))
+		}
+
+		hb := packet.PackHeartbeat()
+
+		if _, err := conn.Write(hb.Bytes()); err != nil {
+			log.Warnf("write heartbeat message error: %v", err)
+		}
+
+		hb.Release()
+
+		return true
+	}
+}
+
+// isClosed reports whether the connection state is closed.
 func (c *clientConn) isClosed() bool {
-	return network.ConnState(c.state.Load()) == network.ConnClosed
+	return c.State() == network.ConnClosed
 }

@@ -1,8 +1,10 @@
 package http
 
 import (
+	stctx "context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dobyte/due/component/http/v2/swagger"
 	"github.com/dobyte/due/v2/component"
@@ -10,12 +12,17 @@ import (
 	xnet "github.com/dobyte/due/v2/core/net"
 	"github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/log"
+	"github.com/dobyte/due/v2/mode"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/logger"
 	"github.com/gofiber/fiber/v3/middleware/recover"
 )
 
+// Server is the HTTP server component.
+//
+// It is built on top of the fiber framework and supports route registration, middleware, CORS,
+// Swagger and more.
 type Server struct {
 	component.Base
 	opts  *options
@@ -48,7 +55,6 @@ func NewServer(opts ...Option) *Server {
 		PassLocalsToViews:            o.passLocalsToViews,
 		ReadBufferSize:               o.readBufferSize,
 		WriteBufferSize:              o.writeBufferSize,
-		ProxyHeader:                  o.proxyHeader,
 		ErrorHandler:                 o.errorHandler,
 		DisableKeepalive:             o.disableKeepalive,
 		DisableDefaultDate:           o.disableDefaultDate,
@@ -59,12 +65,13 @@ func NewServer(opts ...Option) *Server {
 		ReduceMemoryUsage:            o.reduceMemoryUsage,
 		EnableIPValidation:           o.enableIPValidation,
 		EnableSplittingOnParsers:     o.enableSplittingOnParsers,
-		TrustProxy:                   o.trustProxy,
+		ProxyHeader:                  o.proxyOpts.ProxyHeader,
+		TrustProxy:                   o.proxyOpts.TrustProxy.Enable,
 		TrustProxyConfig: fiber.TrustProxyConfig{
-			Proxies:   o.trustProxyConfig.Proxies,
-			LinkLocal: o.trustProxyConfig.LinkLocal,
-			Loopback:  o.trustProxyConfig.Loopback,
-			Private:   o.trustProxyConfig.Private,
+			Proxies:   o.proxyOpts.TrustProxy.Proxies,
+			LinkLocal: o.proxyOpts.TrustProxy.LinkLocal,
+			Loopback:  o.proxyOpts.TrustProxy.Loopback,
+			Private:   o.proxyOpts.TrustProxy.Private,
 		},
 	})
 
@@ -72,7 +79,7 @@ func NewServer(opts ...Option) *Server {
 		s.app.Use(logger.New())
 	}
 
-	s.app.Use(recover.New(recover.Config{EnableStackTrace: true}))
+	s.app.Use(recover.New(recover.Config{EnableStackTrace: !mode.IsReleaseMode()}))
 
 	if s.opts.corsOpts.Enable {
 		s.app.Use(cors.New(cors.Config{
@@ -102,12 +109,11 @@ func NewServer(opts ...Option) *Server {
 	}
 
 	for i := range o.middlewares {
-		switch handler := o.middlewares[i].(type) {
-		case Handler:
+		if handler, ok := o.middlewares[i].(Handler); ok {
 			s.app.Use(func(ctx fiber.Ctx) error {
 				return handler(ctx.(Context))
 			})
-		case fiber.Handler:
+		} else {
 			s.app.Use(handler)
 		}
 	}
@@ -115,20 +121,20 @@ func NewServer(opts ...Option) *Server {
 	return s
 }
 
-// Name 组件名称
+// Name returns the component name.
 func (s *Server) Name() string {
 	return s.opts.name
 }
 
-// Init 初始化组件
+// Init initializes the component.
 func (s *Server) Init() {}
 
-// Proxy 获取HTTP代理API
+// Proxy returns the HTTP proxy API.
 func (s *Server) Proxy() *Proxy {
 	return s.proxy
 }
 
-// Start 启动组件
+// Start starts the component.
 func (s *Server) Start() {
 	listenAddr, exposeAddr, err := xnet.ParseAddr(s.opts.addr)
 	if err != nil {
@@ -139,8 +145,6 @@ func (s *Server) Start() {
 		s.opts.transporter.SetDefaultDiscovery(s.opts.registry)
 	}
 
-	s.printInfo(exposeAddr)
-
 	go func() {
 		if err = s.app.Listen(listenAddr, fiber.ListenConfig{
 			CertFile:              s.opts.certFile,
@@ -150,11 +154,29 @@ func (s *Server) Start() {
 			log.Fatalf("http server startup failed: %v", errors.Unwrap(errors.Unwrap(err)))
 		}
 	}()
+
+	s.printInfo(exposeAddr)
 }
 
+// Destroy destroys the component.
+func (s *Server) Destroy() {
+	if s.app != nil {
+		ctx, cancel := stctx.WithTimeout(stctx.Background(), 10*time.Second)
+		err := s.app.ShutdownWithContext(ctx)
+		cancel()
+
+		if err != nil {
+			log.Warnf("http server shutdown failed: %v", err)
+		}
+	}
+}
+
+// printInfo prints the server startup information.
+//
+// addr is the externally exposed address of the server.
 func (s *Server) printInfo(addr string) {
-	infos := make([]string, 0, 3)
-	infos = append(infos, fmt.Sprintf("Name: %s", s.Name()))
+	rows := make([]string, 0, 5)
+	rows = append(rows, fmt.Sprintf("Name: %s", s.Name()))
 
 	var baseUrl string
 	if s.opts.certFile != "" && s.opts.keyFile != "" {
@@ -163,23 +185,23 @@ func (s *Server) printInfo(addr string) {
 		baseUrl = fmt.Sprintf("http://%s", addr)
 	}
 
-	infos = append(infos, fmt.Sprintf("Url: %s", baseUrl))
+	rows = append(rows, fmt.Sprintf("Url: %s", baseUrl))
 
 	if s.opts.swagOpts.Enable {
-		infos = append(infos, fmt.Sprintf("Swagger: %s/%s", baseUrl, strings.TrimPrefix(s.opts.swagOpts.BasePath, "/")))
+		rows = append(rows, fmt.Sprintf("Swagger: %s/%s", baseUrl, strings.TrimPrefix(s.opts.swagOpts.BasePath, "/")))
 	}
 
 	if s.opts.registry != nil {
-		infos = append(infos, fmt.Sprintf("Registry: %s", s.opts.registry.Name()))
+		rows = append(rows, fmt.Sprintf("Registry: %s", s.opts.registry.Name()))
 	} else {
-		infos = append(infos, "Registry: -")
+		rows = append(rows, "Registry: -")
 	}
 
 	if s.opts.transporter != nil {
-		infos = append(infos, fmt.Sprintf("Transporter: %s", s.opts.transporter.Name()))
+		rows = append(rows, fmt.Sprintf("Transporter: %s", s.opts.transporter.Name()))
 	} else {
-		infos = append(infos, "Transporter: -")
+		rows = append(rows, "Transporter: -")
 	}
 
-	info.PrintBoxInfo("Http", infos...)
+	info.Print("Http", rows...)
 }

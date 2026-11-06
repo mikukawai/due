@@ -4,21 +4,23 @@ import (
 	"sync/atomic"
 )
 
+// NocopyBuffer is a zero-copy buffer.
 type NocopyBuffer struct {
-	len      int          // 字节数
-	num      int          // 节点数
-	head     any          // 头节点
-	tail     any          // 尾节点
-	prev     any          // 上一个节点
-	next     any          // 下一个节点
-	delay    atomic.Int32 // 延迟释放点
-	released atomic.Bool  // 已释放
+	len      atomic.Int64 // Byte count
+	num      int          // Node count
+	head     any          // Head node
+	tail     any          // Tail node
+	next     any          // Next node
+	delay    atomic.Int32 // Delayed release point
+	released atomic.Bool  // Released
 }
 
 var _ Buffer = &NocopyBuffer{}
 
+// NewNocopyBuffer creates a zero-copy buffer mounting the given blocks.
 func NewNocopyBuffer(blocks ...any) *NocopyBuffer {
-	buf := &NocopyBuffer{len: -1}
+	buf := &NocopyBuffer{}
+	buf.len.Store(-1)
 
 	for _, block := range blocks {
 		buf.Mount(block)
@@ -27,10 +29,10 @@ func NewNocopyBuffer(blocks ...any) *NocopyBuffer {
 	return buf
 }
 
-// Len 获取字节长度
+// Len returns the byte length.
 func (b *NocopyBuffer) Len() int {
-	if b.len >= 0 {
-		return b.len
+	if cached := b.len.Load(); cached >= 0 {
+		return int(cached)
 	}
 
 	size := 0
@@ -48,27 +50,39 @@ func (b *NocopyBuffer) Len() int {
 		}
 	}
 
-	b.len = size
+	b.len.Store(int64(size))
 
 	return size
 }
 
-// Mount 挂载块到Buffer上
+// Mount mounts block onto the buffer, at the head or tail according to whence.
 func (b *NocopyBuffer) Mount(block any, whence ...Whence) {
 	switch v := block.(type) {
 	case []byte:
+		if len(v) == 0 {
+			return
+		}
+
 		if len(whence) > 0 && whence[0] == Head {
 			b.addToHead(&NocopyNode{block: v})
 		} else {
 			b.addToTail(&NocopyNode{block: v})
 		}
 	case *Bytes:
+		if v == nil {
+			return
+		}
+
 		if len(whence) > 0 && whence[0] == Head {
 			b.addToHead(&NocopyNode{block: v})
 		} else {
 			b.addToTail(&NocopyNode{block: v})
 		}
 	case *Writer:
+		if v == nil {
+			return
+		}
+
 		if len(whence) > 0 && whence[0] == Head {
 			b.addToHead(&NocopyNode{block: v})
 		} else {
@@ -83,26 +97,35 @@ func (b *NocopyBuffer) Mount(block any, whence ...Whence) {
 	}
 }
 
-// MallocBytes 分配一块内存给Bytes
+// MallocBytes allocates a Bytes with the given capacity and mounts it.
 func (b *NocopyBuffer) MallocBytes(cap int, whence ...Whence) *Bytes {
 	block := MallocBytes(cap)
 
-	b.Mount(block)
+	if block != nil {
+		b.Mount(block, whence...)
+	}
 
 	return block
 }
 
-// MallocWriter 分配一块内存给Writer
+// MallocWriter allocates a Writer with the given capacity and mounts it.
 func (b *NocopyBuffer) MallocWriter(cap int, whence ...Whence) *Writer {
 	block := MallocWriter(cap)
 
-	b.Mount(block)
+	if block != nil {
+		b.Mount(block, whence...)
+	}
 
 	return block
 }
 
-// Visit 迭代
-func (b *NocopyBuffer) Visit(fn func(node *NocopyNode) bool) bool {
+// Nodes returns the number of nodes.
+func (b *NocopyBuffer) Nodes() int {
+	return b.num
+}
+
+// VisitNodes iterates over all nodes.
+func (b *NocopyBuffer) VisitNodes(fn func(node *NocopyNode) bool) bool {
 	for node := b.head; node != nil; {
 		switch n := node.(type) {
 		case *NocopyNode:
@@ -116,7 +139,7 @@ func (b *NocopyBuffer) Visit(fn func(node *NocopyNode) bool) bool {
 		case *NocopyBuffer:
 			next := n.next
 
-			if !n.Visit(fn) {
+			if !n.VisitNodes(fn) {
 				return false
 			}
 
@@ -129,7 +152,7 @@ func (b *NocopyBuffer) Visit(fn func(node *NocopyNode) bool) bool {
 	return true
 }
 
-// Bytes 获取字节
+// Bytes returns all bytes.
 func (b *NocopyBuffer) Bytes() []byte {
 	if b == nil {
 		return nil
@@ -167,12 +190,90 @@ func (b *NocopyBuffer) Bytes() []byte {
 	}
 }
 
-// Delay 设置延迟释放点
-func (b *NocopyBuffer) Delay(delay int32) {
-	b.delay.Store(delay)
+// Slice returns bytes in [lower, upper) without modifying the buffer. A range contained in one
+// block aliases that block; a range spanning blocks is copied. Invalid ranges return nil.
+func (b *NocopyBuffer) Slice(lower, upper int) []byte {
+	if b == nil || lower < 0 || upper < lower || upper > b.Len() || lower == upper {
+		return nil
+	}
+
+	var data []byte
+	for node := b.head; node != nil; {
+		var size int
+		switch n := node.(type) {
+		case *NocopyNode:
+			size = n.Len()
+		case *NocopyBuffer:
+			size = n.Len()
+		default:
+			return nil
+		}
+
+		if lower < size {
+			var part []byte
+			switch n := node.(type) {
+			case *NocopyNode:
+				part = n.Bytes()[lower:min(upper, size)]
+			case *NocopyBuffer:
+				part = n.Slice(lower, min(upper, size))
+			}
+			if data == nil {
+				if upper <= size {
+					return part
+				}
+				data = make([]byte, 0, upper-lower)
+			}
+			data = append(data, part...)
+		}
+		if upper <= size {
+			return data
+		}
+		lower = max(0, lower-size)
+		upper -= size
+		switch n := node.(type) {
+		case *NocopyNode:
+			node = n.next
+		case *NocopyBuffer:
+			node = n.next
+		}
+	}
+	return data
 }
 
-// Release 释放
+// VisitBytes iterates over all bytes.
+func (b *NocopyBuffer) VisitBytes(fn func(bytes []byte) bool) bool {
+	for node := b.head; node != nil; {
+		switch n := node.(type) {
+		case *NocopyNode:
+			next := n.next
+
+			if !fn(n.Bytes()) {
+				return false
+			}
+
+			node = next
+		case *NocopyBuffer:
+			next := n.next
+
+			if !n.VisitBytes(fn) {
+				return false
+			}
+
+			node = next
+		default:
+			return false
+		}
+	}
+
+	return true
+}
+
+// Delay sets the delayed release point.
+func (b *NocopyBuffer) Delay(delay int) {
+	b.delay.Store(int32(delay))
+}
+
+// Release releases the buffer.
 func (b *NocopyBuffer) Release() {
 	if b.delay.Add(-1) > 0 {
 		return
@@ -192,78 +293,113 @@ func (b *NocopyBuffer) Release() {
 			next := n.next
 			n.Release()
 			node = next
+		default:
+			goto OVER
 		}
 	}
-	b.len = -1
+
+OVER:
+	b.len.Store(-1)
 	b.num = 0
 	b.head = nil
 	b.tail = nil
-	b.prev = nil
 	b.next = nil
 }
 
-// 添加到头部
-func (b *NocopyBuffer) addToHead(node any) {
-	if node == nil {
-		return
+// Slide slides the lower index.
+func (b *NocopyBuffer) Slide(delta int) bool {
+	if delta < 0 {
+		return false
 	}
 
+	if delta > b.Len() {
+		return false
+	}
+
+	remaining := delta
+
+	for remaining > 0 {
+		switch n := b.head.(type) {
+		case *NocopyNode:
+			size := n.Len()
+			if size <= remaining {
+				b.removeHead()
+				n.Release()
+				remaining -= size
+			} else {
+				n.Slide(remaining)
+				remaining = 0
+			}
+		case *NocopyBuffer:
+			size := n.Len()
+			if size <= remaining {
+				b.removeHead()
+				n.Release()
+				remaining -= size
+			} else {
+				n.Slide(remaining)
+				remaining = 0
+			}
+		default:
+			return false
+		}
+	}
+
+	b.len.Store(-1)
+
+	return true
+}
+
+// addToHead adds node to the head.
+func (b *NocopyBuffer) addToHead(node any) {
 	switch n := node.(type) {
 	case *NocopyNode:
+		if n == nil {
+			return
+		}
+
 		if b.head == nil {
 			b.head = n
 			b.tail = n
 		} else {
 			n.next = b.head
-
-			switch h := b.head.(type) {
-			case *NocopyNode:
-				h.prev = n
-				b.head = n
-			case *NocopyBuffer:
-				h.prev = n
-				b.head = n
-			}
+			b.head = n
 		}
 
-		b.len = -1
+		b.len.Store(-1)
 		b.num++
 	case *NocopyBuffer:
+		if n == nil {
+			return
+		}
+
 		if b.head == nil {
 			b.head = n
 			b.tail = n
 		} else {
 			n.next = b.head
-
-			switch h := b.head.(type) {
-			case *NocopyNode:
-				h.prev = n
-				b.head = n
-			case *NocopyBuffer:
-				h.prev = n
-				b.head = n
-			}
+			b.head = n
 		}
 
-		b.len = -1
+		b.len.Store(-1)
 		b.num += n.num
+	default:
+		// ignore
 	}
 }
 
-// 添加到尾部
+// addToTail adds node to the tail.
 func (b *NocopyBuffer) addToTail(node any) {
-	if node == nil {
-		return
-	}
-
 	switch n := node.(type) {
 	case *NocopyNode:
+		if n == nil {
+			return
+		}
+
 		if b.tail == nil {
 			b.head = n
 			b.tail = n
 		} else {
-			n.prev = b.tail
-
 			switch t := b.tail.(type) {
 			case *NocopyNode:
 				t.next = n
@@ -274,15 +410,17 @@ func (b *NocopyBuffer) addToTail(node any) {
 			}
 		}
 
-		b.len = -1
+		b.len.Store(-1)
 		b.num++
 	case *NocopyBuffer:
+		if n == nil {
+			return
+		}
+
 		if b.tail == nil {
 			b.head = n
 			b.tail = n
 		} else {
-			n.prev = b.tail
-
 			switch t := b.tail.(type) {
 			case *NocopyNode:
 				t.next = n
@@ -293,7 +431,27 @@ func (b *NocopyBuffer) addToTail(node any) {
 			}
 		}
 
-		b.len = -1
+		b.len.Store(-1)
 		b.num += n.num
+	default:
+		// ignore
 	}
+}
+
+// removeHead removes the head node.
+func (b *NocopyBuffer) removeHead() {
+	switch n := b.head.(type) {
+	case *NocopyNode:
+		b.head = n.next
+		b.num--
+	case *NocopyBuffer:
+		b.head = n.next
+		b.num -= n.num
+	}
+
+	if b.head == nil {
+		b.tail = nil
+	}
+
+	b.len.Store(-1)
 }

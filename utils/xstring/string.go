@@ -1,72 +1,101 @@
 package xstring
 
 import (
-	"math"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
-// FirstCharacterIsUpper 首字符是否是大写
+// firstRune returns the first character of s. It reports ok as false when s is empty or its first
+// byte is an invalid UTF-8 encoding.
+func firstRune(s string) (r rune, ok bool) {
+	r, size := utf8.DecodeRuneInString(s)
+	if size == 0 || (r == utf8.RuneError && size == 1) {
+		return 0, false
+	}
+	return r, true
+}
+
+// FirstCharacterIsUpper reports whether the first character of s is an upper-case letter.
 func FirstCharacterIsUpper(s string) bool {
-	r, _ := utf8.DecodeRuneInString(s)
-	return r != utf8.RuneError && unicode.IsUpper(r)
+	r, ok := firstRune(s)
+	return ok && unicode.IsUpper(r)
 }
 
-// FirstCharacterIsLower 首字符是否是小写
+// FirstCharacterIsLower reports whether the first character of s is a lower-case letter.
 func FirstCharacterIsLower(s string) bool {
-	r, _ := utf8.DecodeRuneInString(s)
-	return r != utf8.RuneError && unicode.IsLower(r)
+	r, ok := firstRune(s)
+	return ok && unicode.IsLower(r)
 }
 
-// FirstCharacterIsNumber 首字符是否是数字
+// FirstCharacterIsNumber reports whether the first character of s is a digit.
 func FirstCharacterIsNumber(s string) bool {
-	r, _ := utf8.DecodeRuneInString(s)
-	return r != utf8.RuneError && unicode.IsNumber(r)
+	r, ok := firstRune(s)
+	return ok && unicode.IsNumber(r)
 }
 
-// FirstCharacterIsSymbol 首字符是否是符号
+// FirstCharacterIsSymbol reports whether the first character of s is a symbol.
 func FirstCharacterIsSymbol(s string) bool {
-	r, _ := utf8.DecodeRuneInString(s)
-	return r != utf8.RuneError && unicode.IsSymbol(r)
+	r, ok := firstRune(s)
+	return ok && unicode.IsSymbol(r)
 }
 
-// Length 获取字符串长度
+// Length returns the number of characters (runes) in s rather than its number of bytes.
 func Length(s string) int {
 	return utf8.RuneCountInString(s)
 }
 
-// PaddingPrefix 填充前缀
+// PaddingPrefix prepends padding to s until the result reaches length characters. Lengths are
+// counted in runes. It returns s unchanged when s already has at least length characters or when
+// padding is empty.
 func PaddingPrefix(s, padding string, length int) string {
-	paddingLen := length - len(s)
+	paddingLen := length - utf8.RuneCountInString(s)
 
-	if paddingLen <= 0 {
+	if paddingLen <= 0 || padding == "" {
 		return s
 	}
 
-	n := int(math.Ceil(float64(paddingLen) / float64(len(padding))))
+	paddingRunes := []rune(padding)
+	n := paddingLen / len(paddingRunes)
+	remainder := paddingLen % len(paddingRunes)
 
-	return strings.Repeat(padding, n)[:paddingLen] + s
+	prefix := strings.Repeat(padding, n)
+	if remainder > 0 {
+		prefix += string(paddingRunes[:remainder])
+	}
+
+	return prefix + s
 }
 
-// PaddingSuffix 填充后缀
+// PaddingSuffix appends padding to s until the result reaches length characters. Lengths are
+// counted in runes. It returns s unchanged when s already has at least length characters or when
+// padding is empty.
 func PaddingSuffix(s, padding string, length int) string {
-	paddingLen := length - len(s)
+	paddingLen := length - utf8.RuneCountInString(s)
 
-	if paddingLen <= 0 {
+	if paddingLen <= 0 || padding == "" {
 		return s
 	}
 
-	n := int(math.Ceil(float64(paddingLen) / float64(len(padding))))
+	paddingRunes := []rune(padding)
+	n := paddingLen / len(paddingRunes)
+	remainder := paddingLen % len(paddingRunes)
 
-	return s + strings.Repeat(padding, n)[:paddingLen]
+	suffix := strings.Repeat(padding, n)
+	if remainder > 0 {
+		suffix += string(paddingRunes[:remainder])
+	}
+
+	return s + suffix
 }
 
-// Replace 替换指定范围的字符串
+// Replace replaces count characters of str with replace repeated count times, starting at the
+// character index start (0-based). A negative count means replacing through the end of the string.
+// It returns str unchanged when start is out of range.
 func Replace(str string, start, count int, replace string) string {
 	s := []rune(str)
 
-	if start >= len(s) {
+	if start < 0 || start >= len(s) {
 		return str
 	}
 

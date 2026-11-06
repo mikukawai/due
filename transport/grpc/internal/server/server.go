@@ -12,6 +12,8 @@ import (
 
 const scheme = "grpc"
 
+// Server is a microservice server that wraps a gRPC server and exposes generic start, stop and
+// registration capabilities.
 type Server struct {
 	listenAddr string
 	exposeAddr string
@@ -19,6 +21,7 @@ type Server struct {
 	server     *grpc.Server
 }
 
+// Options holds the server options.
 type Options struct {
 	Addr       string
 	Expose     bool
@@ -27,6 +30,10 @@ type Options struct {
 	ServerOpts []grpc.ServerOption
 }
 
+// NewServer returns a new microservice server.
+//
+// It parses the listen and expose addresses, and enables the TLS certificate and the unified
+// recovery interceptor as needed.
 func NewServer(opts *Options) (*Server, error) {
 	listenAddr, exposeAddr, err := xnet.ParseAddr(opts.Addr)
 	if err != nil {
@@ -35,8 +42,8 @@ func NewServer(opts *Options) (*Server, error) {
 
 	isSecure := false
 	serverOpts := make([]grpc.ServerOption, 0, len(opts.ServerOpts)+2)
+	serverOpts = append(serverOpts, grpc.ChainUnaryInterceptor(recoverInterceptor))
 	serverOpts = append(serverOpts, opts.ServerOpts...)
-	serverOpts = append(serverOpts, grpc.UnaryInterceptor(recoverInterceptor))
 	if opts.CertFile != "" && opts.KeyFile != "" {
 		cred, err := credentials.NewServerTLSFromFile(opts.CertFile, opts.KeyFile)
 		if err != nil {
@@ -55,22 +62,24 @@ func NewServer(opts *Options) (*Server, error) {
 	return s, nil
 }
 
-// Addr 监听地址
+// Addr returns the server listening address.
 func (s *Server) Addr() string {
 	return s.listenAddr
 }
 
-// Scheme 协议
+// Scheme returns the server protocol scheme.
 func (s *Server) Scheme() string {
 	return scheme
 }
 
-// Endpoint 获取服务端口
+// Endpoint returns the service endpoint.
 func (s *Server) Endpoint() *endpoint.Endpoint {
 	return s.endpoint
 }
 
-// Start 启动服务器
+// Start starts the server.
+//
+// It resolves the listening address and starts the gRPC service.
 func (s *Server) Start() error {
 	addr, err := net.ResolveTCPAddr("tcp", s.listenAddr)
 	if err != nil {
@@ -85,13 +94,15 @@ func (s *Server) Start() error {
 	return s.server.Serve(listener)
 }
 
-// Stop 停止服务器
+// Stop stops the server.
 func (s *Server) Stop() error {
-	s.server.Stop()
+	s.server.GracefulStop()
 	return nil
 }
 
-// RegisterService 注册服务
+// RegisterService registers a service.
+//
+// It accepts a grpc.ServiceDesc or a pointer to one.
 func (s *Server) RegisterService(desc, service any) error {
 	switch sd := desc.(type) {
 	case grpc.ServiceDesc:

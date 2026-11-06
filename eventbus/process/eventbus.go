@@ -5,6 +5,8 @@ import (
 	"sync"
 
 	"github.com/dobyte/due/v2/core/value"
+	"github.com/dobyte/due/v2/errors"
+	"github.com/dobyte/due/v2/eventbus"
 	"github.com/dobyte/due/v2/eventbus/internal"
 	"github.com/dobyte/due/v2/utils/xtime"
 	"github.com/dobyte/due/v2/utils/xuuid"
@@ -22,12 +24,11 @@ func NewEventbus() *Eventbus {
 	return eb
 }
 
-// Publish 发布事件
+// Publish publishes an event.
 func (eb *Eventbus) Publish(ctx context.Context, topic string, payload any) error {
 	eb.rw.RLock()
-	defer eb.rw.RUnlock()
-
 	c, ok := eb.consumers[topic]
+	eb.rw.RUnlock()
 	if !ok {
 		return nil
 	}
@@ -42,39 +43,50 @@ func (eb *Eventbus) Publish(ctx context.Context, topic string, payload any) erro
 	return nil
 }
 
-// Subscribe 订阅事件
-func (eb *Eventbus) Subscribe(ctx context.Context, topic string, handler internal.EventHandler) error {
+// Subscribe subscribes to an event.
+func (eb *Eventbus) Subscribe(ctx context.Context, topic string, handler eventbus.EventHandler, balance ...bool) (eventbus.Subscription, error) {
+	eb.rw.Lock()
+	defer eb.rw.Unlock()
+
+	c, ok := eb.consumers[topic]
+	if ok {
+		if len(balance) > 0 && balance[0] != c.balance {
+			return nil, errors.ErrInvalidArgument
+		}
+	} else {
+		c = &consumer{balance: len(balance) > 0 && balance[0], subscriptions: make([]*subscription, 0, 1)}
+		eb.consumers[topic] = c
+	}
+
+	sub := c.addSubscription(topic, handler)
+	sub.eb = eb
+
+	return sub, nil
+}
+
+// unsubscribe cancels a subscription.
+func (eb *Eventbus) unsubscribe(topic string, sub *subscription) error {
 	eb.rw.Lock()
 	defer eb.rw.Unlock()
 
 	c, ok := eb.consumers[topic]
 	if !ok {
-		c = &consumer{handlers: make(map[uintptr][]internal.EventHandler, 1)}
-		eb.consumers[topic] = c
+		return errors.ErrIllegalOperation
 	}
 
-	c.addHandler(handler)
+	found, empty := c.delSubscription(sub)
+	if !found {
+		return errors.ErrIllegalOperation
+	}
 
-	return nil
-}
-
-// Unsubscribe 取消订阅
-func (eb *Eventbus) Unsubscribe(ctx context.Context, topic string, handler internal.EventHandler) error {
-	eb.rw.Lock()
-	defer eb.rw.Unlock()
-
-	if c, ok := eb.consumers[topic]; ok {
-		if c.delHandler(handler) != 0 {
-			return nil
-		}
-
+	if empty {
 		delete(eb.consumers, topic)
 	}
 
 	return nil
 }
 
-// Close 停止监听
+// Close stops listening.
 func (eb *Eventbus) Close() error {
 	return nil
 }

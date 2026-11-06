@@ -71,6 +71,7 @@ const (
 	StatusNetworkAuthenticationRequired = http.StatusNetworkAuthenticationRequired // RFC 6585, 6
 )
 
+// StatusText returns the text for the given HTTP status code.
 func StatusText(code int) string {
 	return http.StatusText(code)
 }

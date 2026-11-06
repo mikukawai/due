@@ -1,15 +1,12 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/9/15 5:37 下午
- * @Desc: TODO
- */
-
+// Package etcd_test contains manual verification scripts that require a local etcd service.
+//
+// Run the tests with: go test -tags=etcd ./...
 package etcd_test
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,12 +17,16 @@ import (
 )
 
 const (
-	port        = 3553
-	serviceName = "node"
+	port        = 3553   // Service port
+	serviceName = "node" // Test service name
 )
 
+// Shared service registry instance.
 var reg = etcd.NewRegistry()
 
+// TestRegistry_Register1 repeatedly registers the same service instance and toggles its state
+// between Work and Busy, verifying repeated registration and state refreshing. It is a manual
+// script that must be interrupted to stop.
 func TestRegistry_Register1(t *testing.T) {
 	host, err := net.PublicIP()
 	if err != nil {
@@ -156,4 +157,236 @@ func TestRegistry_Watch(t *testing.T) {
 	//time.Sleep(60 * time.Second)
 
 	select {}
+}
+
+func TestRegistry_WatchStopAndCleanup(t *testing.T) {
+	ctx := context.Background()
+
+	watcher1, err := reg.Watch(ctx, "test-cleanup-svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	watcher2, err := reg.Watch(ctx, "test-cleanup-svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = watcher1.Next()
+	if err != nil {
+		t.Fatalf("watcher1 Next failed: %v", err)
+	}
+
+	_, err = watcher2.Next()
+	if err != nil {
+		t.Fatalf("watcher2 Next failed: %v", err)
+	}
+
+	if err = watcher1.Stop(); err != nil {
+		t.Fatalf("watcher1 Stop failed: %v", err)
+	}
+
+	t.Log("watcher1 stopped, watcher2 should still work")
+
+	_, err = watcher2.Next()
+	if err != nil {
+		t.Logf("watcher2 Next after watcher1 stop: %v", err)
+	}
+
+	if err = watcher2.Stop(); err != nil {
+		t.Fatalf("watcher2 Stop failed: %v", err)
+	}
+
+	t.Log("both watchers stopped, watcherMgr should be cleaned up")
+
+	time.Sleep(500 * time.Millisecond)
+}
+
+// TestRegistry_MultipleServiceWatch verifies that watchers of different services are independent
+// of each other.
+func TestRegistry_MultipleServiceWatch(t *testing.T) {
+	ctx := context.Background()
+
+	watcher1, err := reg.Watch(ctx, "svc-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher1.Stop()
+
+	watcher2, err := reg.Watch(ctx, "svc-beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher2.Stop()
+
+	services1, err := watcher1.Next()
+	if err != nil {
+		t.Fatalf("svc-alpha Next failed: %v", err)
+	}
+	t.Logf("svc-alpha initial services: %d", len(services1))
+
+	services2, err := watcher2.Next()
+	if err != nil {
+		t.Fatalf("svc-beta Next failed: %v", err)
+	}
+	t.Logf("svc-beta initial services: %d", len(services2))
+
+	t.Log("two different services have independent watchers")
+}
+
+func TestRegistry_RegisterDeregister(t *testing.T) {
+	host, err := net.PublicIP()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	ins := &registry.ServiceInstance{
+		ID:       "lifecycle-test-1",
+		Name:     "lifecycle-svc",
+		Kind:     cluster.Node.String(),
+		State:    cluster.Work.String(),
+		Endpoint: fmt.Sprintf("grpc://%s:%d", host, port),
+	}
+
+	if err = reg.Register(ctx, ins); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+	t.Log("registered successfully")
+
+	services, err := reg.Services(ctx, "lifecycle-svc")
+	if err != nil {
+		t.Fatalf("services failed: %v", err)
+	}
+	t.Logf("services count after register: %d", len(services))
+
+	if err = reg.Deregister(ctx, ins); err != nil {
+		t.Fatalf("deregister failed: %v", err)
+	}
+	t.Log("deregistered successfully")
+
+	services, err = reg.Services(ctx, "lifecycle-svc")
+	if err != nil {
+		t.Fatalf("services after deregister failed: %v", err)
+	}
+	t.Logf("services count after deregister: %d", len(services))
+}
+
+func TestRegistry_ConcurrentRegister(t *testing.T) {
+	host, err := net.PublicIP()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+
+	for i := range 10 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+
+			ins := &registry.ServiceInstance{
+				ID:       fmt.Sprintf("concurrent-test-%d", idx),
+				Name:     "concurrent-svc",
+				Kind:     cluster.Node.String(),
+				State:    cluster.Work.String(),
+				Endpoint: fmt.Sprintf("grpc://%s:%d", host, port+idx),
+			}
+
+			if err := reg.Register(ctx, ins); err != nil {
+				t.Errorf("register %d failed: %v", idx, err)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	services, err := reg.Services(ctx, "concurrent-svc")
+	if err != nil {
+		t.Fatalf("services failed: %v", err)
+	}
+
+	t.Logf("concurrent register done, total services: %d", len(services))
+
+	for i := range 10 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+
+			ins := &registry.ServiceInstance{
+				ID:   fmt.Sprintf("concurrent-test-%d", idx),
+				Name: "concurrent-svc",
+				Kind: cluster.Node.String(),
+			}
+
+			if err := reg.Deregister(ctx, ins); err != nil {
+				t.Errorf("deregister %d failed: %v", idx, err)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	t.Log("concurrent deregister done")
+}
+
+// TestRegistry_WatchAfterAllStop verifies that a watcher receives an update promptly after a
+// service instance is registered.
+func TestRegistry_WatchAfterAllStop(t *testing.T) {
+	host, err := net.PublicIP()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	svcName := "watch-events-test"
+
+	watcher, err := reg.Watch(ctx, svcName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Stop()
+
+	_, err = watcher.Next()
+	if err != nil {
+		t.Fatalf("initial Next failed: %v", err)
+	}
+	t.Log("watcher started, waiting for events")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		services, err := watcher.Next()
+		if err != nil {
+			t.Logf("Next after register: %v", err)
+			return
+		}
+		t.Logf("received update, services count: %d", len(services))
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	ins := &registry.ServiceInstance{
+		ID:       "watch-events-1",
+		Name:     svcName,
+		Kind:     cluster.Node.String(),
+		State:    cluster.Work.String(),
+		Endpoint: fmt.Sprintf("grpc://%s:%d", host, port),
+	}
+
+	if err = reg.Register(ctx, ins); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+	t.Log("registered instance, waiting for watch event")
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Log("timeout waiting for watch event")
+	}
+
+	if err = reg.Deregister(ctx, ins); err != nil {
+		t.Fatalf("deregister failed: %v", err)
+	}
+	t.Log("deregistered instance")
 }

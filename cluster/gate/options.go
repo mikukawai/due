@@ -1,18 +1,16 @@
-/**
- * @Author: fuxiao
- * @Email: 576101059@qq.com
- * @Date: 2022/7/7 1:31 上午
- * @Desc: TODO
- */
-
 package gate
 
 import (
 	"context"
 	"maps"
+	"slices"
 	"time"
 
 	"github.com/dobyte/due/v2/cluster"
+	"github.com/dobyte/due/v2/core/security/aead"
+	"github.com/dobyte/due/v2/core/security/aead/aesgcm"
+	"github.com/dobyte/due/v2/core/security/aead/chacha20poly1305"
+	"github.com/dobyte/due/v2/crypto"
 	"github.com/dobyte/due/v2/etc"
 	"github.com/dobyte/due/v2/locate"
 	"github.com/dobyte/due/v2/log"
@@ -23,61 +21,76 @@ import (
 )
 
 const (
-	defaultName              = "gate"         // 默认名称
-	defaultDispatch          = cluster.Random // 默认的无状态路由分发策略
-	defaultAddr              = ":0"           // 连接器监听地址
-	defaultConnNum           = 5              // 默认连接数
-	defaultCallTimeout       = "3s"           // 默认调用超时时间
-	defaultDialTimeout       = "3s"           // 默认拨号超时时间
-	defaultDialRetryTimes    = 3              // 默认拨号重试次数
-	defaultWriteTimeout      = "0s"           // 默认写入超时时间
-	defaultWriteQueueSize    = 2048           // 默认写入队列大小
-	defaultFaultRecoveryTime = "5s"           // 默认故障恢复时间
+	defaultName                      = "gate"          // default name
+	defaultDispatch                  = cluster.Random  // default dispatch strategy of stateless route messages
+	defaultAddr                      = ":0"            // connector listen address
+	defaultLinkerConnNum             = 5               // default number of connections
+	defaultLinkerCallTimeout         = "3s"            // default call timeout
+	defaultLinkerDialTimeout         = "3s"            // default dial timeout
+	defaultLinkerDialRetryTimes      = 3               // default number of dial retries
+	defaultLinkerFaultRecoveryTime   = "5s"            // default fault recovery time
+	defaultLinkerCommandQueueSize    = 4096            // default message queue size
+	defaultLinkerCommandWriteTimeout = "0s"            // default write timeout
+	defaultSecurityHandshakeTimeout  = 5 * time.Second // default session security handshake timeout
 )
 
 const (
-	defaultIDKey                = "etc.cluster.gate.id"
-	defaultNameKey              = "etc.cluster.gate.name"
-	defaultDispatchKey          = "etc.cluster.gate.dispatch"
-	defaultMetadataKey          = "etc.cluster.gate.metadata"
-	defaultAddrKey              = "etc.cluster.gate.addr"
-	defaultExposeKey            = "etc.cluster.gate.expose"
-	defaultConnNumKey           = "etc.cluster.gate.connNum"
-	defaultCallTimeoutKey       = "etc.cluster.gate.callTimeout"
-	defaultDialTimeoutKey       = "etc.cluster.gate.dialTimeout"
-	defaultDialRetryTimesKey    = "etc.cluster.gate.dialRetryTimes"
-	defaultWriteTimeoutKey      = "etc.cluster.gate.writeTimeout"
-	defaultWriteQueueSizeKey    = "etc.cluster.gate.writeQueueSize"
-	defaultFaultRecoveryTimeKey = "etc.cluster.gate.faultRecoveryTime"
+	defaultIDKey                        = "etc.cluster.gate.id"
+	defaultNameKey                      = "etc.cluster.gate.name"
+	defaultDispatchKey                  = "etc.cluster.gate.dispatch"
+	defaultMetadataKey                  = "etc.cluster.gate.metadata"
+	defaultAddrKey                      = "etc.cluster.gate.addr"
+	defaultExposeKey                    = "etc.cluster.gate.expose"
+	defaultLinkerConnNumKey             = "etc.cluster.gate.linker.connNum"
+	defaultLinkerCallTimeoutKey         = "etc.cluster.gate.linker.callTimeout"
+	defaultLinkerDialTimeoutKey         = "etc.cluster.gate.linker.dialTimeout"
+	defaultLinkerDialRetryTimesKey      = "etc.cluster.gate.linker.dialRetryTimes"
+	defaultLinkerFaultRecoveryTimeKey   = "etc.cluster.gate.linker.faultRecoveryTime"
+	defaultLinkerCommandQueueSizeKey    = "etc.cluster.gate.linker.commandQueueSize"
+	defaultLinkerCommandWriteTimeoutKey = "etc.cluster.gate.linker.commandWriteTimeout"
 )
 
+// Option is a gate option.
 type Option func(o *options)
 
-type options struct {
-	ctx               context.Context   // 上下文
-	id                string            // 实例ID
-	name              string            // 实例名称
-	server            network.Server    // 网关服务器
-	locator           locate.Locator    // 用户定位器
-	registry          registry.Registry // 服务注册器
-	dispatch          cluster.Dispatch  // 无状态路由消息分发策略
-	metadata          map[string]string // 元数据
-	addr              string            // 内部RPC监听地址
-	expose            bool              // 内部RPC是否暴露到公网
-	connNum           int               // 内部RPC拨号连接数
-	callTimeout       time.Duration     // 内部RPC调用超时时间
-	dialTimeout       time.Duration     // 内部RPC拨号超时时间
-	dialRetryTimes    int               // 内部RPC拨号重试次数
-	writeTimeout      time.Duration     // 内部RPC写入超时时间
-	writeQueueSize    int32             // 内部RPC写入队列大小
-	faultRecoveryTime time.Duration     // 内部RPC故障恢复时间
+// linkerOptions are the linker options.
+type linkerOptions struct {
+	connNum             int           // number of internal RPC dial connections
+	callTimeout         time.Duration // internal RPC call timeout
+	dialTimeout         time.Duration // internal RPC dial timeout
+	dialRetryTimes      int           // number of internal RPC dial retries
+	faultRecoveryTime   time.Duration // internal RPC fault recovery time
+	commandQueueSize    int32         // message queue size
+	commandWriteTimeout time.Duration // message write timeout
 }
 
+// options are the gate options.
+type options struct {
+	ctx                      context.Context   // context
+	id                       string            // instance ID
+	name                     string            // instance name
+	server                   network.Server    // gate server
+	locator                  locate.Locator    // user locator
+	registry                 registry.Registry // service registry
+	dispatch                 cluster.Dispatch  // dispatch strategy of stateless route messages
+	metadata                 map[string]string // metadata
+	addr                     string            // internal RPC listen address
+	expose                   bool              // whether the internal RPC address is exposed to the public network
+	linker                   *linkerOptions    // linker options
+	security                 *securityOptions  // session security options
+	securityHandshakeTimeout time.Duration     // session security handshake timeout
+}
+
+// defaultOptions returns the default options.
+//
+// It reads each default value from the configuration center and builds the default options.
 func defaultOptions() *options {
 	opts := &options{}
 	opts.ctx = context.Background()
 	opts.expose = etc.Get(defaultExposeKey).Bool()
+	opts.linker = &linkerOptions{}
 	opts.metadata = make(map[string]string)
+	opts.securityHandshakeTimeout = defaultSecurityHandshakeTimeout
 
 	if id := etc.Get(defaultIDKey).String(); id != "" {
 		opts.id = id
@@ -103,46 +116,46 @@ func defaultOptions() *options {
 		opts.dispatch = defaultDispatch
 	}
 
-	if connNum := etc.Get(defaultConnNumKey, defaultConnNum).Int(); connNum > 0 {
-		opts.connNum = connNum
+	if connNum := etc.Get(defaultLinkerConnNumKey, defaultLinkerConnNum).Int(); connNum > 0 {
+		opts.linker.connNum = connNum
 	} else {
-		opts.connNum = defaultConnNum
+		opts.linker.connNum = defaultLinkerConnNum
 	}
 
-	if callTimeout := etc.Get(defaultCallTimeoutKey, defaultCallTimeout).Duration(); callTimeout >= 0 {
-		opts.callTimeout = callTimeout
+	if callTimeout := etc.Get(defaultLinkerCallTimeoutKey, defaultLinkerCallTimeout).Duration(); callTimeout >= 0 {
+		opts.linker.callTimeout = callTimeout
 	} else {
-		opts.callTimeout = xconv.Duration(defaultCallTimeout)
+		opts.linker.callTimeout = xconv.Duration(defaultLinkerCallTimeout)
 	}
 
-	if dialTimeout := etc.Get(defaultDialTimeoutKey, defaultDialTimeout).Duration(); dialTimeout >= 0 {
-		opts.dialTimeout = dialTimeout
+	if dialTimeout := etc.Get(defaultLinkerDialTimeoutKey, defaultLinkerDialTimeout).Duration(); dialTimeout >= 0 {
+		opts.linker.dialTimeout = dialTimeout
 	} else {
-		opts.dialTimeout = xconv.Duration(defaultDialTimeout)
+		opts.linker.dialTimeout = xconv.Duration(defaultLinkerDialTimeout)
 	}
 
-	if dialRetryTimes := etc.Get(defaultDialRetryTimesKey, defaultDialRetryTimes).Int(); dialRetryTimes >= 0 {
-		opts.dialRetryTimes = dialRetryTimes
+	if dialRetryTimes := etc.Get(defaultLinkerDialRetryTimesKey, defaultLinkerDialRetryTimes).Int(); dialRetryTimes >= 0 {
+		opts.linker.dialRetryTimes = dialRetryTimes
 	} else {
-		opts.dialRetryTimes = defaultDialRetryTimes
+		opts.linker.dialRetryTimes = defaultLinkerDialRetryTimes
 	}
 
-	if writeTimeout := etc.Get(defaultWriteTimeoutKey, defaultWriteTimeout).Duration(); writeTimeout >= 0 {
-		opts.writeTimeout = writeTimeout
+	if faultRecoveryTime := etc.Get(defaultLinkerFaultRecoveryTimeKey, defaultLinkerFaultRecoveryTime).Duration(); faultRecoveryTime >= 0 {
+		opts.linker.faultRecoveryTime = faultRecoveryTime
 	} else {
-		opts.writeTimeout = xconv.Duration(defaultWriteTimeout)
+		opts.linker.faultRecoveryTime = xconv.Duration(defaultLinkerFaultRecoveryTime)
 	}
 
-	if writeQueueSize := etc.Get(defaultWriteQueueSizeKey, defaultWriteQueueSize).Int32(); writeQueueSize > 0 {
-		opts.writeQueueSize = writeQueueSize
+	if commandQueueSize := etc.Get(defaultLinkerCommandQueueSizeKey, defaultLinkerCommandQueueSize).Int32(); commandQueueSize > 0 {
+		opts.linker.commandQueueSize = commandQueueSize
 	} else {
-		opts.writeQueueSize = defaultWriteQueueSize
+		opts.linker.commandQueueSize = defaultLinkerCommandQueueSize
 	}
 
-	if faultRecoveryTime := etc.Get(defaultFaultRecoveryTimeKey, defaultFaultRecoveryTime).Duration(); faultRecoveryTime >= 0 {
-		opts.faultRecoveryTime = faultRecoveryTime
+	if commandWriteTimeout := etc.Get(defaultLinkerCommandWriteTimeoutKey, defaultLinkerCommandWriteTimeout).Duration(); commandWriteTimeout >= 0 {
+		opts.linker.commandWriteTimeout = commandWriteTimeout
 	} else {
-		opts.faultRecoveryTime = xconv.Duration(defaultFaultRecoveryTime)
+		opts.linker.commandWriteTimeout = xconv.Duration(defaultLinkerCommandWriteTimeout)
 	}
 
 	if err := etc.Get(defaultMetadataKey).Scan(&opts.metadata); err != nil {
@@ -152,7 +165,7 @@ func defaultOptions() *options {
 	return opts
 }
 
-// WithID 设置实例ID
+// WithID sets the instance ID.
 func WithID(id string) Option {
 	return func(o *options) {
 		if id != "" {
@@ -163,7 +176,7 @@ func WithID(id string) Option {
 	}
 }
 
-// WithName 设置实例名称
+// WithName sets the instance name.
 func WithName(name string) Option {
 	return func(o *options) {
 		if name != "" {
@@ -174,7 +187,7 @@ func WithName(name string) Option {
 	}
 }
 
-// WithContext 设置上下文
+// WithContext sets the context.
 func WithContext(ctx context.Context) Option {
 	return func(o *options) {
 		if ctx != nil {
@@ -185,7 +198,7 @@ func WithContext(ctx context.Context) Option {
 	}
 }
 
-// WithServer 设置服务器
+// WithServer sets the server.
 func WithServer(server network.Server) Option {
 	return func(o *options) {
 		if server != nil {
@@ -196,7 +209,7 @@ func WithServer(server network.Server) Option {
 	}
 }
 
-// WithLocator 设置用户定位器
+// WithLocator sets the user locator.
 func WithLocator(locator locate.Locator) Option {
 	return func(o *options) {
 		if locator != nil {
@@ -207,7 +220,7 @@ func WithLocator(locator locate.Locator) Option {
 	}
 }
 
-// WithRegistry 设置服务注册器
+// WithRegistry sets the service registry.
 func WithRegistry(r registry.Registry) Option {
 	return func(o *options) {
 		if r != nil {
@@ -218,7 +231,7 @@ func WithRegistry(r registry.Registry) Option {
 	}
 }
 
-// WithDispatch 设置无状态路由消息分发策略
+// WithDispatch sets the dispatch strategy of stateless route messages.
 func WithDispatch(dispatch cluster.Dispatch) Option {
 	return func(o *options) {
 		if dispatch != "" {
@@ -229,7 +242,7 @@ func WithDispatch(dispatch cluster.Dispatch) Option {
 	}
 }
 
-// WithAddr 设置监听地址
+// WithAddr sets the listen address.
 func WithAddr(addr string) Option {
 	return func(o *options) {
 		if addr != "" {
@@ -240,89 +253,125 @@ func WithAddr(addr string) Option {
 	}
 }
 
-// WithExpose 设置是否将内部通信地址暴露到公网
+// WithExpose sets whether the internal communication address is exposed to the public network.
 func WithExpose(expose bool) Option {
 	return func(o *options) { o.expose = expose }
 }
 
-// WithConnNum 设置连接数
-func WithConnNum(connNum int) Option {
+// WithSessionSecurity enables the session security between the client and the gate.
+//
+// signer signs the ServerHello so that the client can verify the gate with the pinned public key.
+// When no suite is given, the handshake defaults are used. When enabled, the payload of client
+// messages is decrypted by the gate and re-encrypted for the downlink, so the node-side static
+// encryptor must stay unconfigured.
+func WithSessionSecurity(signer crypto.Signer, suites ...aead.Suite) Option {
+	suites = slices.Clone(suites)
+
+	return func(o *options) {
+		if signer == nil {
+			log.Warnf("the specified signer is nil and will be automatically ignored")
+			return
+		}
+
+		configured := suites
+		if len(configured) == 0 {
+			configured = []aead.Suite{aesgcm.Suite, chacha20poly1305.Suite}
+		}
+
+		o.security = &securityOptions{signer: signer, suites: slices.Clone(configured)}
+	}
+}
+
+// WithSessionSecurityHandshakeTimeout sets how long the gate waits for a client to complete the
+// session security handshake. A zero duration disables the timeout.
+func WithSessionSecurityHandshakeTimeout(timeout time.Duration) Option {
+	return func(o *options) {
+		if timeout >= 0 {
+			o.securityHandshakeTimeout = timeout
+		} else {
+			log.Warnf("the specified session security handshake timeout is less than zero and will be ignored")
+		}
+	}
+}
+
+// WithLinkerConnNum sets the number of connections.
+func WithLinkerConnNum(connNum int) Option {
 	return func(o *options) {
 		if connNum > 0 {
-			o.connNum = connNum
+			o.linker.connNum = connNum
 		} else {
-			log.Warnf("the specified connNum is less than zero and will be ignored")
+			log.Warnf("the specified linker's connNum is less than zero and will be ignored")
 		}
 	}
 }
 
-// WithCallTimeout 设置调用超时时间
-func WithCallTimeout(callTimeout time.Duration) Option {
+// WithLinkerCallTimeout sets the RPC call timeout.
+func WithLinkerCallTimeout(callTimeout time.Duration) Option {
 	return func(o *options) {
 		if callTimeout >= 0 {
-			o.callTimeout = callTimeout
+			o.linker.callTimeout = callTimeout
 		} else {
-			log.Warnf("the specified callTimeout is less than zero and will be ignored")
+			log.Warnf("the specified linker's callTimeout is less than zero and will be ignored")
 		}
 	}
 }
 
-// WithDialTimeout 设置拨号超时时间
-func WithDialTimeout(dialTimeout time.Duration) Option {
+// WithLinkerDialTimeout sets the internal RPC dial timeout.
+func WithLinkerDialTimeout(dialTimeout time.Duration) Option {
 	return func(o *options) {
 		if dialTimeout >= 0 {
-			o.dialTimeout = dialTimeout
+			o.linker.dialTimeout = dialTimeout
 		} else {
-			log.Warnf("the specified dialTimeout is less than zero and will be ignored")
+			log.Warnf("the specified linker's dialTimeout is less than zero and will be ignored")
 		}
 	}
 }
 
-// WithDialRetryTimes 设置拨号重试次数
-func WithDialRetryTimes(dialRetryTimes int) Option {
+// WithLinkerDialRetryTimes sets the number of internal RPC dial retries.
+func WithLinkerDialRetryTimes(dialRetryTimes int) Option {
 	return func(o *options) {
 		if dialRetryTimes >= 0 {
-			o.dialRetryTimes = dialRetryTimes
+			o.linker.dialRetryTimes = dialRetryTimes
 		} else {
-			log.Warnf("the specified dialRetryTimes is less than zero and will be ignored")
+			log.Warnf("the specified linker's dialRetryTimes is less than zero and will be ignored")
 		}
 	}
 }
 
-// WithWriteTimeout 设置写入超时时间
-func WithWriteTimeout(writeTimeout time.Duration) Option {
-	return func(o *options) {
-		if writeTimeout >= 0 {
-			o.writeTimeout = writeTimeout
-		} else {
-			log.Warnf("the specified writeTimeout is less than zero and will be ignored")
-		}
-	}
-}
-
-// WithWriteQueueSize 设置写入队列大小
-func WithWriteQueueSize(writeQueueSize int32) Option {
-	return func(o *options) {
-		if writeQueueSize > 0 {
-			o.writeQueueSize = writeQueueSize
-		} else {
-			log.Warnf("the specified writeQueueSize is less than zero and will be ignored")
-		}
-	}
-}
-
-// WithFaultRecoveryTime 设置故障恢复时间
-func WithFaultRecoveryTime(faultRecoveryTime time.Duration) Option {
+// WithLinkerFaultRecoveryTime sets the internal RPC fault recovery time.
+func WithLinkerFaultRecoveryTime(faultRecoveryTime time.Duration) Option {
 	return func(o *options) {
 		if faultRecoveryTime >= 0 {
-			o.faultRecoveryTime = faultRecoveryTime
+			o.linker.faultRecoveryTime = faultRecoveryTime
 		} else {
-			log.Warnf("the specified faultRecoveryTime is less than zero and will be ignored")
+			log.Warnf("the specified linker's faultRecoveryTime is less than zero and will be ignored")
 		}
 	}
 }
 
-// WithMetadata 设置元数据
+// WithLinkerCommandQueueSize sets the message queue size.
+func WithLinkerCommandQueueSize(commandQueueSize int32) Option {
+	return func(o *options) {
+		if commandQueueSize > 0 {
+			o.linker.commandQueueSize = commandQueueSize
+		} else {
+			log.Warnf("the specified linker's messageQueueSize is less than zero and will be ignored")
+		}
+	}
+}
+
+// WithLinkerCommandWriteTimeout sets the write timeout.
+func WithLinkerCommandWriteTimeout(commandWriteTimeout time.Duration) Option {
+	return func(o *options) {
+		if commandWriteTimeout >= 0 {
+			o.linker.commandWriteTimeout = commandWriteTimeout
+		} else {
+			log.Warnf("the specified linker's commandWriteTimeout is less than zero and will be ignored")
+		}
+	}
+}
+
+// WithMetadata sets the metadata.
 func WithMetadata(metadata map[string]string) Option {
 	return func(o *options) {
 		if len(metadata) != 0 {

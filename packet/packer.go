@@ -1,8 +1,7 @@
 package packet
 
 import (
-	"bytes"
-	"encoding/binary"
+	"bufio"
 	"io"
 	"time"
 
@@ -12,46 +11,63 @@ import (
 )
 
 const (
-	dataBit      = 0 << 7 // 数据标识
-	heartbeatBit = 1 << 7 // 心跳标识
+	dataBit                = 0 << 7 // Data frame flag
+	handshakeBit           = 1 << 0 // Handshake frame flag
+	heartbeatBit           = 1 << 7 // Heartbeat frame flag
+	messageBufferAlignment = 16     // Alignment of message buffers
+	// readBufferHeadroom is reserved before every frame read from the wire so that the transport
+	// layer can prepend its own header without copying the payload.
+	readBufferHeadroom = 32
 )
 
-type NocopyReader interface {
-	// Next returns a slice containing the next n bytes from the buffer,
-	// advancing the buffer as if the bytes had been returned by Read.
-	Next(n int) (p []byte, err error)
+// FrameType is the type of a frame read from the wire.
+type FrameType uint8
 
-	// Peek returns the next n bytes without advancing the reader.
-	Peek(n int) (buf []byte, err error)
+const (
+	// FrameData is a business data frame.
+	FrameData FrameType = iota
+	// FrameHeartbeat is a heartbeat frame.
+	FrameHeartbeat
+	// FrameHandshake is a handshake frame.
+	FrameHandshake
+)
 
-	// Release the memory space occupied by all read slices.
-	Release() (err error)
-
-	Slice(n int) (r NocopyReader, err error)
-}
-
+// Packer defines the encoding and decoding capabilities of messages.
 type Packer interface {
-	// ReadBuffer 以buffer的形式读取消息
-	ReadBuffer(reader io.Reader) (buffer.Buffer, error)
-	// PackBuffer 以buffer的形式打包消息
-	PackBuffer(message *Message) (*buffer.NocopyBuffer, error)
-	// ReadMessage 读取消息
-	ReadMessage(reader io.Reader) ([]byte, error)
-	// PackMessage 打包消息
-	PackMessage(message *Message) ([]byte, error)
-	// UnpackMessage 解包消息
-	UnpackMessage(data []byte) (*Message, error)
-	// PackHeartbeat 打包心跳
-	PackHeartbeat() ([]byte, error)
-	// CheckHeartbeat 检测心跳包
-	CheckHeartbeat(data []byte) (bool, error)
+	// Read reads a frame as a buffer. It reports the frame type, the server-side timestamp in
+	// nanoseconds, the frame buffer and any read error. The timestamp is meaningful only for
+	// heartbeat frames.
+	Read(reader io.Reader) (FrameType, int64, buffer.Buffer, error)
+	// PackHandshake packs a handshake frame. A handshake frame carries neither a route nor a
+	// sequence number, and it is marked by a reserved header bit.
+	PackHandshake(payload []byte) (buffer.Buffer, error)
+	// PackHeartbeat packs a heartbeat. Pass server as true to pack a server-side heartbeat.
+	PackHeartbeat(server ...bool) buffer.Buffer
+	// PackMessage packs a message payload and returns the packed buffer or a packing error.
+	PackMessage(route, seq int32, data []byte) (buffer.Buffer, error)
+	// UnpackMessage unpacks the message buffer buf. It returns the route, the sequence number,
+	// the message buffer and any unpacking error.
+	UnpackMessage(buf buffer.Buffer) (int32, int32, buffer.Buffer, error)
+	// ExtractHandshake extracts the payload of a handshake frame. It reports
+	// [errors.ErrInvalidMessage] when buf is not a handshake frame.
+	ExtractHandshake(buf buffer.Buffer) ([]byte, error)
+	// ExtractRouteSeq extracts the route and sequence number from the message buffer buf. It
+	// returns the route, the sequence number and any unpacking error.
+	ExtractRouteSeq(buf buffer.Buffer) (int32, int32, error)
 }
 
+// defaultPacker is the default packer.
 type defaultPacker struct {
-	opts      *options
-	heartbeat []byte
+	opts      *options      // Packing options
+	heartbeat buffer.Buffer // Prebuilt heartbeat packet
 }
 
+var _ Packer = (*defaultPacker)(nil)
+
+// NewPacker returns a new default packer.
+//
+// It validates the options and prebuilds the heartbeat packet. The program terminates when the
+// given options are invalid.
 func NewPacker(opts ...Option) *defaultPacker {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -70,357 +86,508 @@ func NewPacker(opts ...Option) *defaultPacker {
 		log.Fatalf("the number of buffer bytes must be greater than or equal to 0, and give %d", o.bufferBytes)
 	}
 
-	return &defaultPacker{
-		opts:      o,
-		heartbeat: makeHeartbeat(o.byteOrder),
-	}
+	p := &defaultPacker{}
+	p.opts = o
+	p.init()
+
+	return p
 }
 
-// ReadBuffer 以buffer的形式读取消息
-func (p *defaultPacker) ReadBuffer(reader io.Reader) (buffer.Buffer, error) {
-	buf1 := buffer.MallocBytes(defaultSizeBytes)
-	defer buf1.Release()
-
-	if _, err := io.ReadFull(reader, buf1.Bytes()); err != nil {
-		return nil, err
+// Read reads a frame as a buffer.
+//
+// It takes the zero-allocation fast path for *bufio.Reader and falls back to pooled header-buffer
+// reading for other sources.
+func (p *defaultPacker) Read(reader io.Reader) (FrameType, int64, buffer.Buffer, error) {
+	if r, ok := reader.(*bufio.Reader); ok {
+		return p.readBuffered(r)
 	}
 
-	size := p.opts.byteOrder.Uint32(buf1.Bytes())
-
-	if size == 0 {
-		return nil, nil
-	}
-
-	buf2 := buffer.MallocBytes(int(defaultSizeBytes + size))
-	data := buf2.Bytes()
-
-	copy(data[:defaultSizeBytes], buf1.Bytes())
-
-	if _, err := io.ReadFull(reader, data[defaultSizeBytes:]); err != nil {
-		buf2.Release()
-		return nil, err
-	}
-
-	return buf2, nil
+	return p.readPooled(reader)
 }
 
-// PackBuffer 以buffer的形式打包消息
-func (p *defaultPacker) PackBuffer(message *Message) (*buffer.NocopyBuffer, error) {
-	if message.Route > int32(1<<(8*p.opts.routeBytes-1)-1) || message.Route < int32(-1<<(8*p.opts.routeBytes-1)) {
-		return nil, errors.ErrRouteOverflow
+// readBuffered reads from r without allocating.
+//
+// It parses the message header directly from the read buffer through Peek/Discard, performs a
+// single pooled allocation of the message body for data messages, and allocates nothing for
+// heartbeat messages.
+func (p *defaultPacker) readBuffered(r *bufio.Reader) (FrameType, int64, buffer.Buffer, error) {
+	head, err := r.Peek(defaultSizeBytes + defaultHeaderBytes)
+	if err != nil {
+		return FrameData, 0, nil, err
 	}
 
-	if p.opts.seqBytes > 0 {
-		if message.Seq > int32(1<<(8*p.opts.seqBytes-1)-1) || message.Seq < int32(-1<<(8*p.opts.seqBytes-1)) {
-			return nil, errors.ErrSeqOverflow
+	header := head[defaultSizeBytes]
+
+	if header&heartbeatBit == heartbeatBit {
+		switch size := p.opts.byteOrder.Uint32(head[:defaultSizeBytes]); size {
+		case defaultHeaderBytes:
+			_, _ = r.Discard(defaultSizeBytes + defaultHeaderBytes)
+			return FrameHeartbeat, 0, nil, nil
+		case defaultHeaderBytes + defaultHeartbeatTimeBytes:
+			data, err := r.Peek(defaultSizeBytes + defaultHeaderBytes + defaultHeartbeatTimeBytes)
+			if err != nil {
+				return FrameData, 0, nil, err
+			}
+
+			heartbeatTime := int64(p.opts.byteOrder.Uint64(data[defaultSizeBytes+defaultHeaderBytes:]))
+
+			_, _ = r.Discard(defaultSizeBytes + defaultHeaderBytes + defaultHeartbeatTimeBytes)
+
+			return FrameHeartbeat, heartbeatTime, nil, nil
+		default:
+			return FrameData, 0, nil, errors.ErrInvalidMessage
 		}
 	}
 
-	if len(message.Buffer) > p.opts.bufferBytes {
-		return nil, errors.ErrMessageTooLarge
+	size := int64(p.opts.byteOrder.Uint32(head[:defaultSizeBytes]))
+
+	if size <= 0 {
+		return FrameData, 0, nil, errors.ErrInvalidMessage
 	}
 
-	writer := buffer.MallocWriter(defaultSizeBytes + defaultHeaderBytes + p.opts.routeBytes + p.opts.seqBytes)
-	writer.WriteInt32s(p.opts.byteOrder, int32(defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes+len(message.Buffer)))
+	if size > int64(defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes+p.opts.bufferBytes) {
+		return FrameData, 0, nil, errors.ErrMessageTooLarge
+	}
+
+	size -= defaultHeaderBytes
+
+	buf := buffer.MallocBytesWithHeadroom(readBufferHeadroom, int(defaultSizeBytes+defaultHeaderBytes+size))
+
+	if buf == nil {
+		return FrameData, 0, nil, errors.ErrMessageTooLarge
+	}
+
+	data := buf.Bytes()
+
+	copy(data[:defaultSizeBytes+defaultHeaderBytes], head)
+
+	_, _ = r.Discard(defaultSizeBytes + defaultHeaderBytes)
+
+	if _, err = io.ReadFull(r, data[defaultSizeBytes+defaultHeaderBytes:]); err != nil {
+		buf.Release()
+		return FrameData, 0, nil, err
+	}
+
+	return frameType(header), 0, buf, nil
+}
+
+// readPooled reads through a pooled header buffer.
+//
+// The header is read from the byte pool and explicitly released; data messages additionally
+// perform one pooled allocation of the message body and a header copy.
+func (p *defaultPacker) readPooled(reader io.Reader) (FrameType, int64, buffer.Buffer, error) {
+	buf1 := buffer.MallocBytes(defaultSizeBytes + defaultHeaderBytes)
+
+	if buf1 == nil {
+		return FrameData, 0, nil, errors.ErrMessageTooLarge
+	}
+
+	data1 := buf1.Bytes()
+
+	if _, err := io.ReadFull(reader, data1); err != nil {
+		buf1.Release()
+		return FrameData, 0, nil, err
+	}
+
+	header := data1[defaultSizeBytes]
+
+	if header&heartbeatBit == heartbeatBit {
+		switch size := p.opts.byteOrder.Uint32(data1[:defaultSizeBytes]); size {
+		case defaultHeaderBytes:
+			buf1.Release()
+			return FrameHeartbeat, 0, nil, nil
+		case defaultHeaderBytes + defaultHeartbeatTimeBytes:
+			var data [defaultHeartbeatTimeBytes]byte
+
+			if _, err := io.ReadFull(reader, data[:]); err != nil {
+				buf1.Release()
+				return FrameData, 0, nil, err
+			}
+
+			heartbeatTime := int64(p.opts.byteOrder.Uint64(data[:]))
+
+			buf1.Release()
+
+			return FrameHeartbeat, heartbeatTime, nil, nil
+		default:
+			buf1.Release()
+			return FrameData, 0, nil, errors.ErrInvalidMessage
+		}
+	}
+
+	size := int64(p.opts.byteOrder.Uint32(data1[:defaultSizeBytes]))
+
+	if size <= 0 {
+		buf1.Release()
+		return FrameData, 0, nil, errors.ErrInvalidMessage
+	}
+
+	if size > int64(defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes+p.opts.bufferBytes) {
+		buf1.Release()
+		return FrameData, 0, nil, errors.ErrMessageTooLarge
+	}
+
+	size -= defaultHeaderBytes
+
+	buf2 := buffer.MallocBytesWithHeadroom(readBufferHeadroom, int(defaultSizeBytes+defaultHeaderBytes+size))
+
+	if buf2 == nil {
+		buf1.Release()
+		return FrameData, 0, nil, errors.ErrMessageTooLarge
+	}
+
+	data2 := buf2.Bytes()
+
+	copy(data2[:defaultSizeBytes+defaultHeaderBytes], data1)
+
+	buf1.Release()
+
+	if _, err := io.ReadFull(reader, data2[defaultSizeBytes+defaultHeaderBytes:]); err != nil {
+		buf2.Release()
+		return FrameData, 0, nil, err
+	}
+
+	return frameType(header), 0, buf2, nil
+}
+
+// ReadBufferHeadroom returns the space reserved before every frame read from the wire. A transport
+// header that fits in this space can be prepended in place without copying the payload.
+func ReadBufferHeadroom() int {
+	return readBufferHeadroom
+}
+
+// frameType maps the header byte to the frame type. The heartbeat flag takes precedence.
+func frameType(header byte) FrameType {
+	if header&handshakeBit == handshakeBit {
+		return FrameHandshake
+	}
+
+	return FrameData
+}
+
+// PackMessage packs a message payload and returns the packed buffer or a packing error.
+func (p *defaultPacker) PackMessage(route, seq int32, data []byte) (buffer.Buffer, error) {
+	header, err := p.packMessageHeader(route, seq, len(data))
+	if err != nil {
+		return nil, err
+	}
+	return buffer.NewNocopyBuffer(header, data), nil
+}
+
+// PackMessageBuffer packs a pooled payload and transfers ownership on success.
+func (p *defaultPacker) PackMessageBuffer(route, seq int32, payload *buffer.Bytes) (buffer.Buffer, error) {
+	if err := p.validateMessage(route, seq, payload.Len()); err != nil {
+		return nil, err
+	}
+
+	if header := payload.Prepend(p.messageHeaderSize()); header != nil {
+		p.writeMessageHeader(header, route, seq, payload.Len()-len(header))
+		return payload, nil
+	}
+
+	header, err := p.packMessageHeader(route, seq, payload.Len())
+	if err != nil {
+		return nil, err
+	}
+	return buffer.NewNocopyBuffer(header, payload), nil
+}
+
+// MessageBufferHeadroom returns enough reserved space to keep the payload suitably aligned after
+// the canonical message header is prepended.
+func (p *defaultPacker) MessageBufferHeadroom() int {
+	size := p.messageHeaderSize()
+	return (size + messageBufferAlignment - 1) &^ (messageBufferAlignment - 1)
+}
+
+// messageHeaderSize returns the canonical message header size.
+func (p *defaultPacker) messageHeaderSize() int {
+	return defaultSizeBytes + defaultHeaderBytes + p.opts.routeBytes + p.opts.seqBytes
+}
+
+// packMessageHeader validates a message and builds its header independently of payload ownership.
+func (p *defaultPacker) packMessageHeader(route, seq int32, size int) (*buffer.Writer, error) {
+	if err := p.validateMessage(route, seq, size); err != nil {
+		return nil, err
+	}
+
+	writer := buffer.MallocWriter(p.messageHeaderSize())
+	writer.WriteInt32s(
+		p.opts.byteOrder,
+		int32(defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes+size),
+	)
 	writer.WriteInt8s(int8(dataBit))
 
 	switch p.opts.routeBytes {
 	case 1:
-		writer.WriteInt8s(int8(message.Route))
+		writer.WriteInt8s(int8(route))
 	case 2:
-		writer.WriteInt16s(p.opts.byteOrder, int16(message.Route))
+		writer.WriteInt16s(p.opts.byteOrder, int16(route))
 	case 4:
-		writer.WriteInt32s(p.opts.byteOrder, message.Route)
+		writer.WriteInt32s(p.opts.byteOrder, route)
 	}
 
 	switch p.opts.seqBytes {
+	case 0:
+		// ignore seq
 	case 1:
-		writer.WriteInt8s(int8(message.Seq))
+		writer.WriteInt8s(int8(seq))
 	case 2:
-		writer.WriteInt16s(p.opts.byteOrder, int16(message.Seq))
+		writer.WriteInt16s(p.opts.byteOrder, int16(seq))
 	case 4:
-		writer.WriteInt32s(p.opts.byteOrder, message.Seq)
+		writer.WriteInt32s(p.opts.byteOrder, seq)
 	}
 
-	return buffer.NewNocopyBuffer(writer, message.Buffer), nil
+	return writer, nil
 }
 
-// ReadMessage 读取消息
-func (p *defaultPacker) ReadMessage(reader io.Reader) ([]byte, error) {
-	buf := make([]byte, defaultSizeBytes)
-
-	if _, err := io.ReadFull(reader, buf); err != nil {
-		return nil, err
-	}
-
-	size := p.opts.byteOrder.Uint32(buf)
-
-	if size == 0 {
-		return nil, nil
-	}
-
-	data := make([]byte, int(defaultSizeBytes+size))
-
-	copy(data[:defaultSizeBytes], buf)
-
-	if _, err := io.ReadFull(reader, data[defaultSizeBytes:]); err != nil {
-		return nil, err
-	}
-
-	return data, nil
-}
-
-// 无拷贝读取消息
-func (p *defaultPacker) nocopyReadMessage(reader NocopyReader) ([]byte, error) {
-	buf, err := reader.Peek(defaultSizeBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	var size uint32
-
-	if p.opts.byteOrder == binary.BigEndian {
-		size = binary.BigEndian.Uint32(buf)
-	} else {
-		size = binary.LittleEndian.Uint32(buf)
-	}
-
-	if size == 0 {
-		return nil, nil
-	}
-
-	n := int(defaultSizeBytes + size)
-
-	r, err := reader.Slice(n)
-	if err != nil {
-		return nil, err
-	}
-
-	buf, err = r.Next(n)
-	if err != nil {
-		return nil, err
-	}
-
-	if err = reader.Release(); err != nil {
-		return nil, err
-	}
-
-	return buf, nil
-}
-
-// PackMessage 打包消息
-func (p *defaultPacker) PackMessage(message *Message) ([]byte, error) {
-	if message.Route > int32(1<<(8*p.opts.routeBytes-1)-1) || message.Route < int32(-1<<(8*p.opts.routeBytes-1)) {
-		return nil, errors.ErrRouteOverflow
+// validateMessage validates route, sequence number and payload size.
+func (p *defaultPacker) validateMessage(route, seq int32, size int) error {
+	if route > int32(1<<(8*p.opts.routeBytes-1)-1) || route < int32(-1<<(8*p.opts.routeBytes-1)) {
+		return errors.ErrRouteOverflow
 	}
 
 	if p.opts.seqBytes > 0 {
-		if message.Seq > int32(1<<(8*p.opts.seqBytes-1)-1) || message.Seq < int32(-1<<(8*p.opts.seqBytes-1)) {
-			return nil, errors.ErrSeqOverflow
+		if seq > int32(1<<(8*p.opts.seqBytes-1)-1) || seq < int32(-1<<(8*p.opts.seqBytes-1)) {
+			return errors.ErrSeqOverflow
 		}
 	}
 
-	if len(message.Buffer) > p.opts.bufferBytes {
+	if size > p.opts.bufferBytes {
+		return errors.ErrMessageTooLarge
+	}
+	return nil
+}
+
+// writeMessageHeader writes a validated canonical message header into dst.
+func (p *defaultPacker) writeMessageHeader(dst []byte, route, seq int32, size int) {
+	p.opts.byteOrder.PutUint32(
+		dst[:defaultSizeBytes],
+		uint32(defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes+size),
+	)
+	dst[defaultSizeBytes] = byte(dataBit)
+	offset := defaultSizeBytes + defaultHeaderBytes
+
+	switch p.opts.routeBytes {
+	case 1:
+		dst[offset] = byte(route)
+	case 2:
+		p.opts.byteOrder.PutUint16(dst[offset:offset+2], uint16(route))
+	case 4:
+		p.opts.byteOrder.PutUint32(dst[offset:offset+4], uint32(route))
+	}
+	offset += p.opts.routeBytes
+
+	switch p.opts.seqBytes {
+	case 0:
+		// ignore seq
+	case 1:
+		dst[offset] = byte(seq)
+	case 2:
+		p.opts.byteOrder.PutUint16(dst[offset:offset+2], uint16(seq))
+	case 4:
+		p.opts.byteOrder.PutUint32(dst[offset:offset+4], uint32(seq))
+	}
+}
+
+// PackHandshake packs a handshake frame.
+//
+// The frame layout is the header followed by the handshake data, so it carries neither a route nor
+// a sequence number and does not consume a route.
+func (p *defaultPacker) PackHandshake(payload []byte) (buffer.Buffer, error) {
+	if len(payload) > p.opts.bufferBytes {
 		return nil, errors.ErrMessageTooLarge
 	}
 
-	var (
-		size = defaultHeaderBytes + p.opts.routeBytes + p.opts.seqBytes + len(message.Buffer)
-		buf  = &bytes.Buffer{}
-	)
+	writer := buffer.MallocWriter(defaultSizeBytes + defaultHeaderBytes)
+	writer.WriteInt32s(p.opts.byteOrder, int32(defaultHeaderBytes+len(payload)))
+	writer.WriteInt8s(int8(handshakeBit))
 
-	buf.Grow(size + defaultSizeBytes)
-
-	err := binary.Write(buf, p.opts.byteOrder, int32(size))
-	if err != nil {
-		return nil, err
-	}
-
-	err = binary.Write(buf, p.opts.byteOrder, int8(dataBit))
-	if err != nil {
-		return nil, err
-	}
-
-	switch p.opts.routeBytes {
-	case 1:
-		err = binary.Write(buf, p.opts.byteOrder, int8(message.Route))
-	case 2:
-		err = binary.Write(buf, p.opts.byteOrder, int16(message.Route))
-	case 4:
-		err = binary.Write(buf, p.opts.byteOrder, message.Route)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	switch p.opts.seqBytes {
-	case 1:
-		err = binary.Write(buf, p.opts.byteOrder, int8(message.Seq))
-	case 2:
-		err = binary.Write(buf, p.opts.byteOrder, int16(message.Seq))
-	case 4:
-		err = binary.Write(buf, p.opts.byteOrder, message.Seq)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	err = binary.Write(buf, p.opts.byteOrder, message.Buffer)
-	if err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
+	return buffer.NewNocopyBuffer(writer, payload), nil
 }
 
-// UnpackMessage 解包消息
-func (p *defaultPacker) UnpackMessage(data []byte) (*Message, error) {
-	var (
-		ln     = defaultSizeBytes + defaultHeaderBytes + p.opts.routeBytes + p.opts.seqBytes
-		reader = bytes.NewReader(data)
-		size   uint32
-		header uint8
-	)
-
-	if len(data)-ln < 0 {
-		return nil, errors.ErrInvalidMessage
-	}
-
-	err := binary.Read(reader, p.opts.byteOrder, &size)
-	if err != nil {
-		return nil, err
-	}
-
-	if uint64(len(data))-defaultSizeBytes != uint64(size) {
-		return nil, errors.ErrInvalidMessage
-	}
-
-	err = binary.Read(reader, p.opts.byteOrder, &header)
-	if err != nil {
-		return nil, err
-	}
-
-	if header&dataBit != dataBit {
-		return nil, errors.ErrInvalidMessage
-	}
-
-	message := &Message{}
-
-	switch p.opts.routeBytes {
-	case 1:
-		var route int8
-		if err = binary.Read(reader, p.opts.byteOrder, &route); err != nil {
-			return nil, err
-		} else {
-			message.Route = int32(route)
-		}
-	case 2:
-		var route int16
-		if err = binary.Read(reader, p.opts.byteOrder, &route); err != nil {
-			return nil, err
-		} else {
-			message.Route = int32(route)
-		}
-	case 4:
-		var route int32
-		if err = binary.Read(reader, p.opts.byteOrder, &route); err != nil {
-			return nil, err
-		} else {
-			message.Route = route
-		}
-	}
-
-	switch p.opts.seqBytes {
-	case 1:
-		var seq int8
-		if err = binary.Read(reader, p.opts.byteOrder, &seq); err != nil {
-			return nil, err
-		} else {
-			message.Seq = int32(seq)
-		}
-	case 2:
-		var seq int16
-		if err = binary.Read(reader, p.opts.byteOrder, &seq); err != nil {
-			return nil, err
-		} else {
-			message.Seq = int32(seq)
-		}
-	case 4:
-		var seq int32
-		if err = binary.Read(reader, p.opts.byteOrder, &seq); err != nil {
-			return nil, err
-		} else {
-			message.Seq = seq
-		}
-	}
-
-	message.Buffer = data[ln:]
-
-	return message, nil
-}
-
-// PackHeartbeat 打包心跳
-func (p *defaultPacker) PackHeartbeat() ([]byte, error) {
-	if p.opts.heartbeatTime {
-		var (
-			buf  = &bytes.Buffer{}
-			size = defaultHeaderBytes + defaultHeartbeatTimeBytes
-		)
-
-		buf.Grow(defaultSizeBytes + size)
-
-		if err := binary.Write(buf, p.opts.byteOrder, uint32(size)); err != nil {
-			return nil, err
-		}
-
-		if err := binary.Write(buf, p.opts.byteOrder, uint8(heartbeatBit)); err != nil {
-			return nil, err
-		}
-
-		if err := binary.Write(buf, p.opts.byteOrder, time.Now().UnixNano()); err != nil {
-			return nil, err
-		}
-
-		return buf.Bytes(), nil
-	} else {
-		return p.heartbeat, nil
-	}
-}
-
-// CheckHeartbeat 检测心跳包
-func (p *defaultPacker) CheckHeartbeat(data []byte) (bool, error) {
+// ExtractHandshake extracts the payload of a handshake frame.
+func (p *defaultPacker) ExtractHandshake(buf buffer.Buffer) ([]byte, error) {
+	data := buf.Bytes()
 	if len(data) < defaultSizeBytes+defaultHeaderBytes {
-		return false, errors.ErrInvalidMessage
+		return nil, errors.ErrInvalidMessage
 	}
 
-	var (
-		size   uint32
-		header uint8
-		reader = bytes.NewReader(data)
-	)
-
-	if err := binary.Read(reader, p.opts.byteOrder, &size); err != nil {
-		return false, err
+	if data[defaultSizeBytes]&handshakeBit != handshakeBit {
+		return nil, errors.ErrInvalidMessage
 	}
 
-	if uint64(len(data))-defaultSizeBytes != uint64(size) {
-		return false, errors.ErrInvalidMessage
+	if uint64(len(data))-defaultSizeBytes != uint64(p.opts.byteOrder.Uint32(data[:defaultSizeBytes])) {
+		return nil, errors.ErrInvalidMessage
 	}
 
-	if err := binary.Read(reader, p.opts.byteOrder, &header); err != nil {
-		return false, err
-	}
-
-	return header&heartbeatBit == heartbeatBit, nil
+	return data[defaultSizeBytes+defaultHeaderBytes:], nil
 }
 
-// 构建心跳包
-func makeHeartbeat(byteOrder binary.ByteOrder) []byte {
-	buf := bytes.NewBuffer(nil)
-	buf.Grow(defaultSizeBytes + defaultHeaderBytes)
+// ExtractRouteSeq extracts the route and sequence number from the message buffer buf. It returns
+// the route, the sequence number and any unpacking error.
+func (p *defaultPacker) ExtractRouteSeq(buf buffer.Buffer) (int32, int32, error) {
+	var (
+		ln   = defaultSizeBytes + defaultHeaderBytes + p.opts.routeBytes + p.opts.seqBytes
+		data []byte
+	)
+	if segmented, ok := buf.(*buffer.NocopyBuffer); ok {
+		data = segmented.Slice(0, ln)
+	} else {
+		data = buf.Bytes()
+	}
+	return p.extractMessageHeader(data, buf.Len())
+}
 
-	_ = binary.Write(buf, byteOrder, uint32(defaultHeaderBytes))
-	_ = binary.Write(buf, byteOrder, uint8(heartbeatBit))
+// extractMessageHeader validates the frame size and decodes the canonical business header.
+func (p *defaultPacker) extractMessageHeader(data []byte, total int) (int32, int32, error) {
+	ln := defaultSizeBytes + defaultHeaderBytes + p.opts.routeBytes + p.opts.seqBytes
+	if len(data) < ln {
+		return 0, 0, errors.ErrInvalidMessage
+	}
 
-	return buf.Bytes()
+	size := p.opts.byteOrder.Uint32(data[:defaultSizeBytes])
+
+	if uint64(total)-defaultSizeBytes != uint64(size) {
+		return 0, 0, errors.ErrInvalidMessage
+	}
+
+	header := data[defaultSizeBytes]
+
+	if header&heartbeatBit == heartbeatBit || header&handshakeBit == handshakeBit {
+		return 0, 0, errors.ErrInvalidMessage
+	}
+
+	var route int32
+
+	switch p.opts.routeBytes {
+	case 1:
+		route = int32(int8(data[defaultSizeBytes+defaultHeaderBytes]))
+	case 2:
+		route = int32(int16(p.opts.byteOrder.Uint16(data[defaultSizeBytes+defaultHeaderBytes : defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes])))
+	case 4:
+		route = int32(p.opts.byteOrder.Uint32(data[defaultSizeBytes+defaultHeaderBytes : defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes]))
+	default:
+		return 0, 0, errors.ErrInvalidMessage
+	}
+
+	var seq int32
+
+	switch p.opts.seqBytes {
+	case 0:
+		// ignore seq
+	case 1:
+		seq = int32(int8(data[defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes]))
+	case 2:
+		seq = int32(int16(p.opts.byteOrder.Uint16(data[defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes : defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes])))
+	case 4:
+		seq = int32(p.opts.byteOrder.Uint32(data[defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes : defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes]))
+	default:
+		return 0, 0, errors.ErrInvalidMessage
+	}
+
+	return route, seq, nil
+}
+
+// ExtractMessage returns the route, the sequence number and the payload of buf without modifying
+// the buffer.
+func (p *defaultPacker) ExtractMessage(buf buffer.Buffer) (int32, int32, []byte, error) {
+	ln := defaultSizeBytes + defaultHeaderBytes + p.opts.routeBytes + p.opts.seqBytes
+	if segmented, ok := buf.(*buffer.NocopyBuffer); ok {
+		route, seq, err := p.ExtractRouteSeq(buf)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		return route, seq, segmented.Slice(ln, buf.Len()), nil
+	}
+	data := buf.Bytes()
+	route, seq, err := p.extractMessageHeader(data, len(data))
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return route, seq, data[ln:], nil
+}
+
+// UnpackMessage unpacks the message buffer buf. It returns the route, the sequence number,
+// the message buffer and any unpacking error.
+func (p *defaultPacker) UnpackMessage(buf buffer.Buffer) (int32, int32, buffer.Buffer, error) {
+	var (
+		ln   = defaultSizeBytes + defaultHeaderBytes + p.opts.routeBytes + p.opts.seqBytes
+		data = buf.Bytes()
+	)
+
+	if len(data) < ln {
+		return 0, 0, nil, errors.ErrInvalidMessage
+	}
+
+	size := p.opts.byteOrder.Uint32(data[:defaultSizeBytes])
+
+	if uint64(len(data))-defaultSizeBytes != uint64(size) {
+		return 0, 0, nil, errors.ErrInvalidMessage
+	}
+
+	header := data[defaultSizeBytes]
+
+	if header&heartbeatBit == heartbeatBit || header&handshakeBit == handshakeBit {
+		return 0, 0, nil, errors.ErrInvalidMessage
+	}
+
+	var route int32
+
+	switch p.opts.routeBytes {
+	case 1:
+		route = int32(int8(data[defaultSizeBytes+defaultHeaderBytes]))
+	case 2:
+		route = int32(int16(p.opts.byteOrder.Uint16(data[defaultSizeBytes+defaultHeaderBytes : defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes])))
+	case 4:
+		route = int32(p.opts.byteOrder.Uint32(data[defaultSizeBytes+defaultHeaderBytes : defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes]))
+	default:
+		return 0, 0, nil, errors.ErrInvalidMessage
+	}
+
+	var seq int32
+
+	switch p.opts.seqBytes {
+	case 0:
+		// ignore seq
+	case 1:
+		seq = int32(int8(data[defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes]))
+	case 2:
+		seq = int32(int16(p.opts.byteOrder.Uint16(data[defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes : defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes])))
+	case 4:
+		seq = int32(p.opts.byteOrder.Uint32(data[defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes : defaultSizeBytes+defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes]))
+	default:
+		return 0, 0, nil, errors.ErrInvalidMessage
+	}
+
+	buf.Slide(ln)
+
+	return route, seq, buf, nil
+}
+
+// PackHeartbeat packs a heartbeat.
+//
+// When the heartbeat time is enabled it carries the current timestamp; otherwise it returns the
+// prebuilt heartbeat packet. Note that the packet returned without a heartbeat time is a shared,
+// prebuilt buffer that the caller must neither modify nor release.
+func (p *defaultPacker) PackHeartbeat(server ...bool) buffer.Buffer {
+	if p.opts.heartbeatTime && len(server) > 0 && server[0] {
+		writer := buffer.MallocWriter(defaultSizeBytes + defaultHeaderBytes + defaultHeartbeatTimeBytes)
+		writer.WriteUint32s(p.opts.byteOrder, uint32(defaultHeaderBytes+defaultHeartbeatTimeBytes))
+		writer.WriteUint8s(uint8(heartbeatBit))
+		writer.WriteUint64s(p.opts.byteOrder, uint64(time.Now().UnixNano()))
+
+		return writer
+	} else {
+		return p.heartbeat
+	}
+}
+
+// init initializes the packer by building the base heartbeat packet without a timestamp using the
+// configured byte order.
+func (p *defaultPacker) init() {
+	writer := buffer.NewWriter(make([]byte, defaultSizeBytes+defaultHeaderBytes), true)
+	writer.WriteUint32s(p.opts.byteOrder, uint32(defaultHeaderBytes))
+	writer.WriteUint8s(uint8(heartbeatBit))
+
+	p.heartbeat = writer
 }

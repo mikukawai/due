@@ -8,9 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dobyte/due/network/ws/v2"
+	ws "github.com/dobyte/due/network/ws/v2"
 	"github.com/dobyte/due/v2/cluster"
 	"github.com/dobyte/due/v2/cluster/client"
+	"github.com/dobyte/due/v2/core/buffer"
 	"github.com/dobyte/due/v2/encoding"
 )
 
@@ -147,11 +148,15 @@ func (m *Manager) onMessage(ctx *client.Context) {
 		return
 	}
 
-	buf, _ := ctx.Data().([]byte)
+	buf, ok := ctx.Data().(buffer.Buffer)
+	if !ok {
+		return
+	}
+	// The framework releases the buffer after this callback; the inbox must own a copy.
 	sc.enqueue(&Message{
 		Route: ctx.Route(),
 		Seq:   ctx.Seq(),
-		Data:  append(json.RawMessage(nil), buf...),
+		Data:  append(json.RawMessage(nil), buf.Bytes()...),
 		Time:  time.Now(),
 	})
 }
